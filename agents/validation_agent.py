@@ -61,7 +61,7 @@ class ValidationAgent:
 
             if timestamp is not None:
                 try:
-                    readable_time = datetime.fromint(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                    readable_time = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
                 except Exception:
                     Warnings.append(f"Timestamp {timestamp} cannot be converted to readable time format.")    
             
@@ -70,7 +70,7 @@ class ValidationAgent:
 
                 if abs(daily_change) > 0.2:
                     Warnings.append(f"Large daily price change detected: {daily_change:.2%} (current: {current_price}, previous close: {previous_close_price})")
-                elif abs(daily_change) > 0.5:
+                elif abs(daily_change) > 0.05:
                     Warnings.append(f"Moderate daily price change detected: {daily_change:.2%} (current: {current_price}, previous close: {previous_close_price})")
 
             is_valid = len(issues) == 0

@@ -10,7 +10,7 @@ class DataAgent:
 
     def __init__(self):
         self.finnhub_api_key = os.getenv("FINNHUB_API_KEY")
-        self.base_url = "https://finnhub.io/api/v1"
+        self.base_url = "https://finnhub.io/api/v1/quote"
 
     def get_live_quote(self, symbol: str) -> dict:
         
