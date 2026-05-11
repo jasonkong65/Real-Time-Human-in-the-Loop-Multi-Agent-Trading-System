@@ -10,42 +10,59 @@ st.set_page_config(
 )
 
 st.title("Real-Time Trading Agent")
-st.subheader("Step 1: Data Agent + Validation Agent")
+st.subheader("Step 3–4: Finnhub + iTick Multi-Source Validation")
 
 st.info(
-    "This prototype uses Finnhub API to collect live stock quote data. "
-    "The Validation Agent checks whether the data is valid before any trading analysis is performed."
+    "This prototype uses Finnhub as the primary market data source and iTick as a secondary source. "
+    "The Validation Agent compares both sources and adjusts confidence based on data consistency."
 )
 
-symbol = st.text_input("Enter stock symbol", value="AAPL")
+col1, col2 = st.columns(2)
 
-if st.button("Get Live Quote"):
+with col1:
+    symbol = st.text_input("Enter stock symbol", value="AAPL")
+
+with col2:
+    region = st.selectbox("iTick region", options=["US", "HK", "SH", "SZ"], index=0)
+
+if st.button("Get Multi-Source Quote"):
     data_agent = DataAgent()
     validation_agent = ValidationAgent()
 
-    with st.spinner("Data Agent is collecting live market data..."):
-        quote = data_agent.get_live_quote(symbol)
+    with st.spinner("Data Agent is collecting data from Finnhub and iTick..."):
+        multi_quote = data_agent.get_multi_source_quote(symbol, region)
 
     st.subheader("1. Data Agent Output")
-    st.json(quote)
 
-    with st.spinner("Validation Agent is checking data quality..."):
-        validation_result = validation_agent.validate_quote(quote)
+    left, right = st.columns(2)
 
-    st.subheader("2. Validation Agent Output")
-    st.json(validation_result)
+    with left:
+        st.markdown("### Finnhub")
+        st.json(multi_quote["finnhub"])
 
-    if validation_result["is_valid"]:
-        st.success(validation_result["summary"])
+    with right:
+        st.markdown("### iTick")
+        st.json(multi_quote["itick"])
+
+    with st.spinner("Validation Agent is performing multi-source validation..."):
+        multi_validation = validation_agent.validate_multi_source_quote(multi_quote)
+
+    st.subheader("2. Multi-Source Validation Output")
+    st.json(multi_validation)
+
+    if multi_validation["is_valid"] and multi_validation["confidence"] == "High":
+        st.success(multi_validation["summary"])
+    elif multi_validation["is_valid"]:
+        st.warning(multi_validation["summary"])
     else:
-        st.error(validation_result["summary"])
+        st.error(multi_validation["summary"])
 
-    if validation_result["warnings"]:
+    if multi_validation["warnings"]:
         st.warning("Warnings detected:")
-        for warning in validation_result["warnings"]:
+        for warning in multi_validation["warnings"]:
             st.write(f"- {warning}")
 
-    if validation_result["issues"]:
+    if multi_validation["issues"]:
         st.error("Issues detected:")
-        for issue in validation_result["issues"]:
+        for issue in multi_validation["issues"]:
             st.write(f"- {issue}")
