@@ -7,10 +7,6 @@ class AnalystAgent:
     Stage 1: Quote-level analysis using live quote data.
     Stage 2: Historical analysis using OHLCV historical data.
     Stage 3: Combine both stages into a final analyst decision.
-
-    This makes the agent more robust:
-    - If historical data is unavailable, it can still perform basic quote-level analysis.
-    - If historical data is available, it produces richer quantitative features for the Training Agent.
     """
 
     @staticmethod
@@ -31,8 +27,7 @@ class AnalystAgent:
     def analyse_quote_level(self, multi_quote: dict, validation_result: dict) -> dict:
         """
         Stage 1:
-        Perform fast quote-level analysis using current price, previous close,
-        open, high, and low from Finnhub.
+        Perform fast quote-level analysis using validated live quote data.
         """
         agent_goal = "Perform fast quote-level analysis using validated live market data."
 
@@ -47,80 +42,84 @@ class AnalystAgent:
                 "reasoning_steps": []
             }
 
-        finnhub_quote = multi_quote.get("finnhub", {})
         symbol = multi_quote.get("symbol")
-
         selected_price = self._safe_float(validation_result.get("selected_price"))
-        previous_close = self._safe_float(finnhub_quote.get("previous_close_price"))
-        open_price = self._safe_float(finnhub_quote.get("open_price"))
-        high_price = self._safe_float(finnhub_quote.get("high_price"))
-        low_price = self._safe_float(finnhub_quote.get("low_price"))
 
-        issues = []
-        reasoning_steps = []
+        finnhub = multi_quote.get("finnhub", {})
 
-        if selected_price is None:
-            issues.append("Selected price is missing.")
-        if previous_close is None or previous_close <= 0:
-            issues.append("Previous close price is missing or invalid.")
+        previous_close = self._safe_float(finnhub.get("previous_close_price"))
+        open_price = self._safe_float(finnhub.get("open_price"))
+        high_price = self._safe_float(finnhub.get("high_price"))
+        low_price = self._safe_float(finnhub.get("low_price"))
 
-        if issues:
+        if selected_price is None or previous_close is None or previous_close <= 0:
             return {
                 "success": False,
                 "stage": "Stage 1: Quote-level Analysis",
                 "agent_goal": agent_goal,
-                "issues": issues,
+                "symbol": symbol,
                 "agent_decision": "Quote-level analysis cannot continue because key price fields are missing.",
                 "summary": "Quote-level analysis failed.",
                 "quote_features": None,
-                "reasoning_steps": reasoning_steps
+                "reasoning_steps": []
             }
 
         daily_return = (selected_price - previous_close) / previous_close
-        reasoning_steps.append(
-            f"Calculated daily return using selected price {selected_price} and previous close {previous_close}."
-        )
 
         open_to_current_return = None
         if open_price is not None and open_price > 0:
             open_to_current_return = (selected_price - open_price) / open_price
-            reasoning_steps.append(
-                f"Calculated open-to-current return using open price {open_price}."
-            )
 
         intraday_range_pct = None
-        if high_price is not None and low_price is not None and previous_close > 0:
-            intraday_range_pct = (high_price - low_price) / previous_close
-            reasoning_steps.append(
-                f"Calculated intraday range using high price {high_price} and low price {low_price}."
-            )
+        if high_price is not None and low_price is not None and selected_price > 0:
+            intraday_range_pct = (high_price - low_price) / selected_price
 
-        if daily_return >= 0.02:
+        reasoning_steps = [
+            f"Calculated daily return using selected price {selected_price} and previous close {previous_close}."
+        ]
+
+        if open_price is not None:
+            reasoning_steps.append(f"Calculated open-to-current return using open price {open_price}.")
+
+        if high_price is not None and low_price is not None:
+            reasoning_steps.append(f"Calculated intraday range using high price {high_price} and low price {low_price}.")
+
+        if daily_return > 0.02:
             quote_trend = "Strong upward"
-        elif daily_return >= 0.005:
+        elif daily_return > 0.005:
             quote_trend = "Slight upward"
-        elif daily_return <= -0.02:
+        elif daily_return < -0.02:
             quote_trend = "Strong downward"
-        elif daily_return <= -0.005:
+        elif daily_return < -0.005:
             quote_trend = "Slight downward"
         else:
             quote_trend = "Neutral"
 
         if intraday_range_pct is None:
             quote_volatility_level = "Unknown"
-        elif intraday_range_pct >= 0.05:
+        elif intraday_range_pct > 0.04:
             quote_volatility_level = "High"
-        elif intraday_range_pct >= 0.02:
+        elif intraday_range_pct > 0.02:
             quote_volatility_level = "Medium"
         else:
             quote_volatility_level = "Low"
 
         quote_score = 0.5
 
-        if quote_trend in ["Strong upward", "Slight upward"]:
-            quote_score += 0.15
-        elif quote_trend in ["Strong downward", "Slight downward"]:
-            quote_score -= 0.15
+        if daily_return > 0.02:
+            quote_score += 0.20
+        elif daily_return > 0.005:
+            quote_score += 0.10
+        elif daily_return < -0.02:
+            quote_score -= 0.20
+        elif daily_return < -0.005:
+            quote_score -= 0.10
+
+        if open_to_current_return is not None:
+            if open_to_current_return > 0.01:
+                quote_score += 0.10
+            elif open_to_current_return < -0.01:
+                quote_score -= 0.10
 
         if quote_volatility_level == "High":
             quote_score -= 0.10
@@ -200,6 +199,7 @@ class AnalystAgent:
             }
 
         symbol = multi_quote.get("symbol")
+        historical_source = historical_data.get("source", "historical data source")
         price_records = historical_data.get("prices", [])
         feature_df = build_trading_features(price_records)
 
@@ -225,7 +225,7 @@ class AnalystAgent:
         rsi_14 = self._safe_float(latest.get("rsi_14"))
 
         reasoning_steps = [
-            "Loaded historical daily OHLCV data from Alpha Vantage.",
+            f"Loaded historical daily OHLCV data from {historical_source}.",
             "Calculated return_1, return_5, return_20, MA gap, volatility, RSI, and volume change.",
             "Converted technical indicators into a historical analyst signal."
         ]
@@ -280,7 +280,7 @@ class AnalystAgent:
             historical_score -= 0.15
 
         if historical_volatility_level == "High":
-            historical_score -= 0.15
+            historical_score -= 0.10
         elif historical_volatility_level == "Low":
             historical_score += 0.05
 
@@ -302,10 +302,10 @@ class AnalystAgent:
             agent_decision = "Historical indicators suggest positive technical conditions."
         elif historical_score <= 0.35:
             historical_signal = "HISTORICAL_BEARISH"
-            agent_decision = "Historical indicators suggest weak technical conditions or elevated risk."
+            agent_decision = "Historical indicators suggest downside risk."
         elif historical_volatility_level == "High":
             historical_signal = "HISTORICAL_HIGH_VOLATILITY"
-            agent_decision = "Historical volatility is elevated, so downstream agents should apply stricter risk control."
+            agent_decision = "Historical indicators show elevated volatility."
         else:
             historical_signal = "HISTORICAL_NEUTRAL"
             agent_decision = "Historical indicators do not show a strong directional signal."
@@ -332,6 +332,7 @@ class AnalystAgent:
             "stage": "Stage 2: Historical Analysis",
             "agent_goal": agent_goal,
             "symbol": symbol,
+            "historical_source": historical_source,
             "latest_feature_date": str(latest.get("date")),
             "return_1": return_1,
             "return_1_pct": self._format_pct(return_1),
@@ -401,7 +402,6 @@ class AnalystAgent:
 
         final_score = max(0, min(1, final_score))
 
-        # Prefer historical features for model training if available.
         if historical_result.get("success"):
             features_for_model = historical_result.get("historical_features")
             trend = historical_result.get("historical_trend")
@@ -481,11 +481,6 @@ class AnalystAgent:
     def analyse_market(self, multi_quote: dict, validation_result: dict, historical_data: dict) -> dict:
         """
         Public method used by app.py.
-
-        Runs:
-        1. quote-level analysis
-        2. historical analysis
-        3. combined decision
         """
         quote_result = self.analyse_quote_level(multi_quote, validation_result)
         historical_result = self.analyse_historical(multi_quote, validation_result, historical_data)

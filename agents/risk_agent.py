@@ -141,7 +141,7 @@ class RiskAgent:
             return "DOWNGRADE_TO_HOLD", reasons
 
         if model_confidence == "Low" and model_signal == "SELL_RISK":
-            reasons.append("Model confidence is low, but SELL_RISK is a cautious signal.")
+            reasons.append("Model confidence is low, but SELL_RISK is already a cautious signal.")
             return "KEEP_SIGNAL", reasons
 
         if volatility == "High" and model_signal == "BUY_CANDIDATE":
@@ -200,6 +200,22 @@ class RiskAgent:
 
         return max(values, key=values.get)
 
+    def _normalize_action_for_signal(self, model_signal: str, action: str) -> str:
+        """
+        Normalize risk actions based on the current model signal.
+
+        DOWNGRADE_TO_HOLD is mainly meaningful for BUY_CANDIDATE.
+        If the signal is already SELL_RISK, keeping the cautious signal is clearer
+        and more consistent than saying it is downgraded to HOLD.
+        """
+        if model_signal == "SELL_RISK" and action == "DOWNGRADE_TO_HOLD":
+            return "KEEP_SIGNAL"
+
+        if model_signal == "HOLD" and action == "DOWNGRADE_TO_HOLD":
+            return "KEEP_SIGNAL"
+
+        return action
+
     def _more_conservative_action(self, action_a: str, action_b: str) -> str:
         """
         Choose the more conservative action between rule-based and Q-learning actions.
@@ -222,7 +238,14 @@ class RiskAgent:
 
         return model_signal
 
-    def _risk_level(self, validation_result: dict, analysis_result: dict, signal_result: dict, final_signal: str, risk_action: str) -> str:
+    def _risk_level(
+        self,
+        validation_result: dict,
+        analysis_result: dict,
+        signal_result: dict,
+        final_signal: str,
+        risk_action: str
+    ) -> str:
         confidence = self._discretize_confidence(validation_result)
         volatility = analysis_result.get("volatility_level", "Unknown")
         model_confidence = self._get_model_confidence_level(signal_result)
@@ -262,9 +285,22 @@ class RiskAgent:
             signal_result=signal_result
         )
 
-        q_learning_action = self._choose_q_action(state)
+        raw_q_learning_action = self._choose_q_action(state)
 
-        final_risk_action = self._more_conservative_action(rule_action, q_learning_action)
+        normalized_rule_action = self._normalize_action_for_signal(
+            model_signal=model_signal,
+            action=rule_action
+        )
+
+        q_learning_action = self._normalize_action_for_signal(
+            model_signal=model_signal,
+            action=raw_q_learning_action
+        )
+
+        final_risk_action = self._more_conservative_action(
+            normalized_rule_action,
+            q_learning_action
+        )
 
         final_signal = self._apply_risk_action(
             model_signal=model_signal,
@@ -283,16 +319,19 @@ class RiskAgent:
             f"Built Q-learning state: {state}.",
             f"Model confidence level: {model_confidence}.",
             f"Rule-based safety layer suggested: {rule_action}.",
-            f"Q-learning layer suggested: {q_learning_action}.",
+            f"Rule-based action after signal normalization: {normalized_rule_action}.",
+            f"Raw Q-learning layer suggested: {raw_q_learning_action}.",
+            f"Q-learning action after signal normalization: {q_learning_action}.",
             f"Final risk action selected: {final_risk_action}.",
             f"Final signal after risk adjustment: {final_signal}."
         ]
 
         explanation_for_llm = (
             f"The original signal was {model_signal} with {model_confidence.lower()} model confidence. "
-            f"The rule-based safety layer suggested {rule_action}, while the Q-learning layer suggested {q_learning_action}. "
-            f"The final risk action is {final_risk_action}, so the final signal becomes {final_signal}. "
-            f"The estimated risk level is {risk_level}."
+            f"The rule-based safety layer suggested {rule_action}, and after normalization this became "
+            f"{normalized_rule_action}. The raw Q-learning layer suggested {raw_q_learning_action}, and after "
+            f"normalization this became {q_learning_action}. The final risk action is {final_risk_action}, "
+            f"so the final signal becomes {final_signal}. The estimated risk level is {risk_level}."
         )
 
         return {
@@ -301,8 +340,10 @@ class RiskAgent:
             "q_state": state,
             "original_signal": model_signal,
             "model_confidence_level": model_confidence,
-            "rule_based_action": rule_action,
+            "rule_based_action": normalized_rule_action,
+            "raw_rule_based_action": rule_action,
             "rule_reasons": rule_reasons,
+            "raw_q_learning_action": raw_q_learning_action,
             "q_learning_action": q_learning_action,
             "risk_action": final_risk_action,
             "final_signal": final_signal,
@@ -315,10 +356,11 @@ class RiskAgent:
                 "symbol": analysis_result.get("symbol"),
                 "original_signal": model_signal,
                 "model_confidence_level": model_confidence,
+                "raw_q_learning_action": raw_q_learning_action,
+                "q_learning_action": q_learning_action,
                 "final_signal": final_signal,
                 "risk_level": risk_level,
                 "risk_action": final_risk_action,
-                "q_learning_action": q_learning_action,
                 "q_state": state,
                 "explanation_for_llm": explanation_for_llm
             },
