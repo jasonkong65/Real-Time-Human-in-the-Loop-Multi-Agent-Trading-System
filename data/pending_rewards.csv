@@ -1,0 +1,5 @@
+decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,status
+5d6c1d02,MSFT,408.69,2026-05-14 14:47:36,High|Low|HOLD|NEUTRAL|Low,KEEP_SIGNAL,HOLD,Medium,pending
+c62405d4,TSLA,445.62,2026-05-14 14:51:48,High|Medium|BUY_CANDIDATE|NEUTRAL|Medium,KEEP_SIGNAL,BUY_CANDIDATE,Low,pending
+8471bb8e,AAPL,298.6,2026-05-14 14:52:42,High|Low|SELL_RISK|NEUTRAL|Medium,KEEP_SIGNAL,SELL_RISK,High,pending
+f815c192,NVDA,235.71,2026-05-14 14:53:15,Medium|Medium|SELL_RISK|NEUTRAL|Low,KEEP_SIGNAL,SELL_RISK,High,pending

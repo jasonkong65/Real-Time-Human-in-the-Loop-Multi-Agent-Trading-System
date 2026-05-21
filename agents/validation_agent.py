@@ -24,6 +24,58 @@ class ValidationAgent:
         except (TypeError, ValueError):
             return None
 
+    def _parse_quote_date(self, timestamp):
+        """
+        Convert API timestamp into a date object.
+
+        Supports:
+        - Finnhub Unix timestamp
+        - Alpha Vantage YYYY-MM-DD string
+        - YYYY-MM-DD HH:MM:SS string
+        """
+        if timestamp is None:
+            return None
+
+        try:
+            if isinstance(timestamp, (int, float)):
+                return datetime.fromtimestamp(timestamp).date()
+
+            if isinstance(timestamp, str):
+                for fmt in ["%Y-%m-%d", "%Y-%m-%d %H:%M:%S"]:
+                    try:
+                        return datetime.strptime(timestamp, fmt).date()
+                    except ValueError:
+                        continue
+
+            return None
+
+        except Exception:
+            return None
+
+    def _check_secondary_staleness(self, primary_timestamp, secondary_timestamp, max_lag_days: int = 1):
+        """
+        Check whether the secondary source is older than the primary source.
+        """
+        primary_date = self._parse_quote_date(primary_timestamp)
+        secondary_date = self._parse_quote_date(secondary_timestamp)
+
+        if primary_date is None or secondary_date is None:
+            return {
+                "secondary_source_stale": False,
+                "source_date_difference_days": None,
+                "primary_date": str(primary_date) if primary_date else None,
+                "secondary_date": str(secondary_date) if secondary_date else None
+            }
+
+        date_diff = (primary_date - secondary_date).days
+
+        return {
+            "secondary_source_stale": date_diff > max_lag_days,
+            "source_date_difference_days": date_diff,
+            "primary_date": str(primary_date),
+            "secondary_date": str(secondary_date)
+        }
+
     def validate_quote(self, quote: dict) -> dict:
         """
         Validate one source of quote data.
@@ -87,10 +139,8 @@ class ValidationAgent:
 
         if timestamp is not None:
             try:
-                if isinstance(timestamp, (int, float)):
-                    readable_time = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    readable_time = str(timestamp)
+                parsed_date = self._parse_quote_date(timestamp)
+                readable_time = str(parsed_date) if parsed_date else str(timestamp)
             except Exception:
                 warnings.append(f"Timestamp {timestamp} cannot be converted.")
 
@@ -168,7 +218,6 @@ class ValidationAgent:
         if not alpha_vantage_valid:
             warnings.append(f"Alpha Vantage unavailable: {alpha_vantage.get('error', 'Unknown error')}")
 
-        # If primary source fails, block later analysis.
         if not finnhub_valid:
             next_action = "BLOCK_ANALYSIS"
             agent_decision = "The primary data source failed, so later analysis should be blocked."
@@ -186,6 +235,12 @@ class ValidationAgent:
                 "agent_goal": agent_goal,
                 "agent_decision": agent_decision,
                 "reasoning_steps": reasoning_steps,
+                "secondary_source_stale": False,
+                "source_date_difference_days": None,
+                "source_dates": {
+                    "primary_date": None,
+                    "secondary_date": None
+                },
                 "validation_for_next_agent": {
                     "symbol": multi_quote.get("symbol"),
                     "selected_price": None,
@@ -210,6 +265,13 @@ class ValidationAgent:
 
         price_difference = None
 
+        staleness_info = self._check_secondary_staleness(
+            primary_timestamp=finnhub.get("timestamp"),
+            secondary_timestamp=alpha_vantage.get("timestamp")
+        )
+
+        secondary_source_stale = staleness_info["secondary_source_stale"]
+
         if finnhub_price and alpha_vantage_valid and alpha_vantage_price:
             price_difference = abs(finnhub_price - alpha_vantage_price) / finnhub_price
 
@@ -218,14 +280,28 @@ class ValidationAgent:
             )
             reasoning_steps.append(f"Calculated relative price difference: {price_difference:.2%}.")
 
-            if price_difference > price_diff_threshold:
-                warnings.append(
-                    f"Multi-source price mismatch detected: "
-                    f"Finnhub={finnhub_price}, Alpha Vantage={alpha_vantage_price}, "
-                    f"difference={price_difference:.2%}."
+            if staleness_info["source_date_difference_days"] is not None:
+                reasoning_steps.append(
+                    f"Checked source dates: Finnhub={staleness_info['primary_date']}, "
+                    f"Alpha Vantage={staleness_info['secondary_date']}."
                 )
 
-        # Finnhub is the primary source, so it is selected for downstream agents.
+            if price_difference > price_diff_threshold:
+                if secondary_source_stale:
+                    warnings.append(
+                        f"Secondary source may be stale: "
+                        f"Finnhub date={staleness_info['primary_date']}, "
+                        f"Alpha Vantage date={staleness_info['secondary_date']}, "
+                        f"date lag={staleness_info['source_date_difference_days']} days. "
+                        f"Price difference={price_difference:.2%}."
+                    )
+                else:
+                    warnings.append(
+                        f"Multi-source price mismatch detected: "
+                        f"Finnhub={finnhub_price}, Alpha Vantage={alpha_vantage_price}, "
+                        f"difference={price_difference:.2%}."
+                    )
+
         selected_price = finnhub_price
         selected_source = "Finnhub"
 
@@ -250,15 +326,29 @@ class ValidationAgent:
             confidence_score = 0.65
             is_valid = True
             next_action = "ALLOW_ANALYSIS_WITH_CAUTION"
-            agent_decision = "The primary data is usable, but downstream agents should treat it with caution because the two sources differ."
-            summary = "Primary source is valid, but multi-source price difference was detected."
+
+            if secondary_source_stale:
+                agent_decision = (
+                    "The primary data is usable, but the secondary source may be stale. "
+                    "Downstream agents should treat the result with caution."
+                )
+                summary = "Primary source is valid, but the secondary source appears stale."
+            else:
+                agent_decision = (
+                    "The primary data is usable, but downstream agents should treat it with caution "
+                    "because the two sources differ."
+                )
+                summary = "Primary source is valid, but multi-source price difference was detected."
 
         else:
             confidence = "Medium"
             confidence_score = 0.6
             is_valid = True
             next_action = "ALLOW_ANALYSIS_WITH_CAUTION"
-            agent_decision = "The primary data is usable, but the secondary source is unavailable, so downstream agents should be cautious."
+            agent_decision = (
+                "The primary data is usable, but the secondary source is unavailable, "
+                "so downstream agents should be cautious."
+            )
             summary = "Primary source is valid, but secondary source is unavailable. Confidence reduced."
 
         return {
@@ -274,13 +364,20 @@ class ValidationAgent:
             "agent_goal": agent_goal,
             "agent_decision": agent_decision,
             "reasoning_steps": reasoning_steps,
+            "secondary_source_stale": secondary_source_stale,
+            "source_date_difference_days": staleness_info["source_date_difference_days"],
+            "source_dates": {
+                "primary_date": staleness_info["primary_date"],
+                "secondary_date": staleness_info["secondary_date"]
+            },
             "validation_for_next_agent": {
                 "symbol": multi_quote.get("symbol"),
                 "selected_price": selected_price,
                 "selected_source": selected_source,
                 "confidence": confidence,
                 "confidence_score": confidence_score,
-                "next_action": next_action
+                "next_action": next_action,
+                "secondary_source_stale": secondary_source_stale
             },
             "summary": summary
         }

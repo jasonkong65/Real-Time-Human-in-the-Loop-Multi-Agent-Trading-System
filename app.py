@@ -5,59 +5,73 @@ from agents.validation_agent import ValidationAgent
 from agents.analyst_agent import AnalystAgent
 from agents.training_agent import TrainingAgent
 from agents.risk_agent import RiskAgent
+from agents.historical_data_agent import HistoricalDataAgent
+from agents.reward_agent import RewardAgent
 
 
 st.set_page_config(
-    page_title="LLM-Enhanced Multi-Agent Trading System",
+    page_title="Human-in-the-Loop Multi-Agent Trading System",
     layout="wide"
 )
 
 
 @st.cache_data(ttl=300)
-def fetch_market_data(symbol: str):
+def fetch_quote_data(symbol: str):
     """
-    Cached market data fetcher.
+    Cached quote data fetcher.
 
     The cache lasts for 300 seconds.
     This reduces repeated API calls during testing and demo.
     """
     data_agent = DataAgent()
-
     multi_quote = data_agent.get_multi_source_quote(symbol)
-    historical_data = data_agent.get_historical_daily_prices(symbol)
-
-    return multi_quote, historical_data
+    return multi_quote
 
 
-st.title("LLM-Enhanced Multi-Agent Trading System")
+st.title("Human-in-the-Loop Multi-Agent Trading System")
+
 st.subheader(
-    "Data Agent + Validation Agent + Two-Stage Analyst Agent + Training Agent + Q-learning Risk Agent"
+    "Data Agent + Validation Agent + Two-Stage Analyst Agent + "
+    "Training Agent + Q-learning Risk Agent + Reward Agent"
 )
 
 st.info(
     "This prototype collects market data from Finnhub and Alpha Vantage, "
     "validates multi-source consistency, performs two-stage market analysis, "
-    "trains or loads a lightweight signal model, and applies rule-based plus "
-    "Q-learning risk control before user confirmation."
+    "trains or loads a lightweight signal model, applies rule-based plus "
+    "Q-learning risk control, and records paper decisions for delayed reward updates."
 )
 
 symbol = st.text_input("Enter stock symbol", value="AAPL")
+force_retrain = st.checkbox("Force retrain signal model", value=False)
+
 
 if st.button("Run Agent Pipeline"):
+    clean_symbol = symbol.upper().strip()
+
     validation_agent = ValidationAgent()
     analyst_agent = AnalystAgent()
-    training_agent = TrainingAgent()
+    historical_data_agent = HistoricalDataAgent()
+    training_agent = TrainingAgent(model_path=f"models/signal_model_{clean_symbol}.pkl")
     risk_agent = RiskAgent()
+    reward_agent = RewardAgent()
 
-    # 1. Data Agent
-    with st.spinner("Data Agent is collecting market data..."):
-        multi_quote, historical_data = fetch_market_data(symbol)
+    # 1. Data Agent: quote data
+    with st.spinner("Data Agent is collecting quote data..."):
+        multi_quote = fetch_quote_data(clean_symbol)
 
-    # 2. Validation Agent
+    # 2. Historical Data Agent: local cache or yfinance download
+    with st.spinner("Historical Data Agent is finding or downloading historical data..."):
+        historical_data = historical_data_agent.get_or_download_data(
+            clean_symbol,
+            period="2y"
+        )
+
+    # 3. Validation Agent
     with st.spinner("Validation Agent is checking multi-source data reliability..."):
         validation_result = validation_agent.validate_multi_source_quote(multi_quote)
 
-    # 3. Analyst Agent
+    # 4. Analyst Agent
     with st.spinner("Analyst Agent is calculating quote-level and historical features..."):
         analysis_result = analyst_agent.analyse_market(
             multi_quote=multi_quote,
@@ -65,18 +79,21 @@ if st.button("Run Agent Pipeline"):
             historical_data=historical_data
         )
 
-    # 4. Training Agent
+    # 5. Training Agent
     with st.spinner("Training Agent is training or loading the signal model..."):
-        if historical_data.get("success"):
-            training_result = training_agent.train_from_historical_data(historical_data)
+        if training_agent.model_exists() and not force_retrain:
+            training_result = training_agent.load_existing_model_info()
         else:
-            training_result = training_agent.train_from_csv("data/historical_data.csv")
+            if historical_data.get("success"):
+                training_result = training_agent.train_from_historical_data(historical_data)
+            else:
+                training_result = training_agent.train_from_csv("data/historical_data.csv")
 
-    # 5. Signal Model
+    # 6. Signal Model
     with st.spinner("Signal Model is generating trading signal..."):
         signal_result = training_agent.predict_signal(analysis_result)
 
-    # 6. Risk Agent
+    # 7. Risk Agent
     with st.spinner("Risk Agent is applying safety rules and Q-learning risk adjustment..."):
         risk_result = risk_agent.assess_risk(
             validation_result=validation_result,
@@ -84,12 +101,25 @@ if st.button("Run Agent Pipeline"):
             signal_result=signal_result
         )
 
+    # Store latest result for manual feedback fallback
     st.session_state["last_risk_result"] = risk_result
+
+    # 8. Reward Agent: update previous pending decisions first
+    with st.spinner("Reward Agent is checking previous pending delayed rewards..."):
+        auto_reward_update_result = reward_agent.auto_update_due_rewards()
+
+    # 9. Reward Agent: record current paper decision for future delayed reward
+    with st.spinner("Reward Agent is recording current paper decision..."):
+        reward_record_result = reward_agent.record_pending_decision(
+            symbol=clean_symbol,
+            entry_price=validation_result.get("selected_price"),
+            risk_result=risk_result
+        )
 
     # Summary section
     st.subheader("Agent Decision Summary")
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 
     with col1:
         st.metric("Symbol", multi_quote.get("symbol", "N/A"))
@@ -107,12 +137,19 @@ if st.button("Run Agent Pipeline"):
         st.metric("Model Signal", signal_result.get("model_signal", "N/A"))
 
     with col6:
+        st.metric("Model Confidence", signal_result.get("confidence_level", "N/A"))
+
+    with col7:
         st.metric("Final Signal", risk_result.get("final_signal", "N/A"))
+
+    with col8:
+        st.metric("Risk Level", risk_result.get("risk_level", "N/A"))
 
     st.write(f"**Validation Decision:** {validation_result.get('agent_decision', 'N/A')}")
     st.write(f"**Analyst Decision:** {analysis_result.get('agent_decision', 'N/A')}")
     st.write(f"**Signal Model Decision:** {signal_result.get('agent_decision', 'N/A')}")
     st.write(f"**Risk Decision:** {risk_result.get('agent_decision', 'N/A')}")
+    st.write(f"**Reward Agent:** {reward_record_result.get('summary', 'N/A')}")
 
     # Main status messages
     if validation_result.get("is_valid") and validation_result.get("confidence") == "High":
@@ -127,6 +164,11 @@ if st.button("Run Agent Pipeline"):
     else:
         st.error(analysis_result.get("summary", "Analysis failed."))
 
+    if training_result.get("success"):
+        st.success(training_result.get("summary", "Training or model loading completed."))
+    else:
+        st.warning(training_result.get("summary", "Training failed or was skipped."))
+
     if signal_result.get("success"):
         st.success(signal_result.get("summary", "Signal generated."))
     else:
@@ -136,6 +178,16 @@ if st.button("Run Agent Pipeline"):
         st.success(risk_result.get("summary", "Risk assessment completed."))
     else:
         st.error(risk_result.get("summary", "Risk assessment failed."))
+
+    if reward_record_result.get("success"):
+        st.success(reward_record_result.get("summary", "Reward decision recorded."))
+    else:
+        st.warning(reward_record_result.get("summary", "Reward decision was not recorded."))
+
+    if auto_reward_update_result.get("updated_count", 0) > 0:
+        st.success(auto_reward_update_result.get("summary"))
+    else:
+        st.info(auto_reward_update_result.get("summary"))
 
     # 1. Data Agent Output
     st.subheader("1. Data Agent Output")
@@ -150,11 +202,13 @@ if st.button("Run Agent Pipeline"):
         st.markdown("### Alpha Vantage Quote")
         st.json(multi_quote["alpha_vantage"])
 
+    # Historical data summary only
     with st.expander("Show Historical Data Summary"):
         st.write({
             "source": historical_data.get("source"),
             "success": historical_data.get("success"),
             "symbol": historical_data.get("symbol"),
+            "file_path": historical_data.get("file_path"),
             "num_price_records": len(historical_data.get("prices", [])),
             "error": historical_data.get("error")
         })
@@ -182,6 +236,14 @@ if st.button("Run Agent Pipeline"):
     # 6. Risk Agent Output
     st.subheader("6. Risk Agent Output")
     st.json(risk_result)
+
+    # 7. Reward Agent Output
+    st.subheader("7. Reward Agent Output")
+    st.json(reward_record_result)
+
+    # 8. Automatic Delayed Reward Output
+    st.subheader("8. Auto Delayed Reward Update Output")
+    st.json(auto_reward_update_result)
 
     # Reasoning steps
     if validation_result.get("reasoning_steps"):
@@ -220,18 +282,18 @@ if st.button("Run Agent Pipeline"):
             st.write(f"- {issue}")
 
 
-# Q-learning feedback section
+# Manual Q-learning feedback section
 if "last_risk_result" in st.session_state:
-    st.subheader("Q-learning Feedback Demo")
+    st.subheader("Manual Q-learning Feedback Demo")
 
     st.info(
-        "This section simulates delayed reward feedback. "
-        "In a real trading system, future_return would come from later market outcomes. "
-        "Here, it is manually entered for demonstration."
+        "This is a manual fallback demo for Q-learning feedback. "
+        "The system also records paper decisions and can automatically update "
+        "delayed rewards when later real market prices become available."
     )
 
     future_return = st.number_input(
-        "Enter simulated future return for Q-learning update",
+        "Enter simulated future return for manual Q-learning update",
         min_value=-0.20,
         max_value=0.20,
         value=0.00,
@@ -239,12 +301,12 @@ if "last_risk_result" in st.session_state:
         format="%.3f"
     )
 
-    if st.button("Update Risk Q-table"):
+    if st.button("Update Risk Q-table Manually"):
         feedback_risk_agent = RiskAgent()
         update_result = feedback_risk_agent.update_from_feedback(
             risk_result=st.session_state["last_risk_result"],
             future_return=future_return
         )
 
-        st.subheader("Q-learning Update Output")
+        st.subheader("Manual Q-learning Update Output")
         st.json(update_result)

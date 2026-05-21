@@ -12,15 +12,12 @@ from utils.features import build_trading_features
 class TrainingAgent:
     """
     Training Agent:
-    Trains and uses a lightweight stock signal model.
+    Trains, loads, and uses a lightweight stock signal model.
 
     The model predicts:
     - BUY_CANDIDATE
     - HOLD
     - SELL_RISK
-
-    It does not train the LLM.
-    It trains a small machine learning model using historical market features.
     """
 
     def __init__(self, model_path: str = "models/signal_model.pkl"):
@@ -38,6 +35,63 @@ class TrainingAgent:
             "validation_confidence_score"
         ]
 
+    def model_exists(self) -> bool:
+        """
+        Check whether a trained model already exists.
+        """
+        return self.model_path.exists()
+
+    def load_existing_model_info(self) -> dict:
+        """
+        Load metadata of an existing trained model without retraining.
+        """
+        if not self.model_path.exists():
+            return {
+                "success": False,
+                "agent_goal": "Load an existing trained signal model.",
+                "agent_decision": "No existing model was found.",
+                "summary": f"Model not found at {self.model_path}.",
+                "model_path": str(self.model_path)
+            }
+
+        try:
+            model_bundle = joblib.load(self.model_path)
+
+            return {
+                "success": True,
+                "agent_goal": "Load an existing trained signal model.",
+                "agent_decision": "Existing signal model was loaded. Retraining was skipped.",
+                "model_path": str(self.model_path),
+                "model_type": type(model_bundle.get("model")).__name__,
+                "trained_at": model_bundle.get("trained_at"),
+                "feature_columns": model_bundle.get("feature_columns"),
+                "label_rule": model_bundle.get("label_rule"),
+                "summary": f"Loaded existing signal model from {self.model_path}."
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "agent_goal": "Load an existing trained signal model.",
+                "agent_decision": "Existing model could not be loaded.",
+                "summary": f"Model loading failed: {str(e)}",
+                "model_path": str(self.model_path)
+            }
+
+    def _confidence_level(self, prediction_confidence):
+        """
+        Convert prediction probability into a readable confidence level.
+        """
+        if prediction_confidence is None:
+            return "Unknown"
+
+        if prediction_confidence >= 0.65:
+            return "High"
+        elif prediction_confidence >= 0.45:
+            return "Medium"
+        else:
+            return "Low"
+
     def _make_label(self, future_return: float) -> str:
         """
         Convert future 5-day return into a training label.
@@ -51,7 +105,7 @@ class TrainingAgent:
 
     def train_from_historical_data(self, historical_data: dict) -> dict:
         """
-        Train signal model using historical_data returned by DataAgent.
+        Train signal model using historical_data returned by DataAgent or HistoricalDataAgent.
         """
         if not historical_data.get("success"):
             return {
@@ -128,10 +182,8 @@ class TrainingAgent:
                 "model_path": str(self.model_path)
             }
 
-        # Add validation confidence for training data.
         feature_df["validation_confidence_score"] = 1.0
 
-        # Future 5-day return becomes the training target.
         feature_df["future_return_5"] = feature_df["close"].shift(-5) / feature_df["close"] - 1
         feature_df["target_signal"] = feature_df["future_return_5"].apply(
             lambda x: self._make_label(x) if pd.notna(x) else None
@@ -188,7 +240,10 @@ class TrainingAgent:
             "model": model,
             "feature_columns": self.feature_columns,
             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "label_rule": "future_return_5 > 1.5% = BUY_CANDIDATE; < -1.5% = SELL_RISK; otherwise HOLD"
+            "label_rule": "future_return_5 > 1.5% = BUY_CANDIDATE; < -1.5% = SELL_RISK; otherwise HOLD",
+            "num_samples": len(model_df),
+            "train_accuracy": round(train_accuracy, 3),
+            "test_accuracy": round(test_accuracy, 3) if test_accuracy is not None else None
         }
 
         joblib.dump(model_bundle, self.model_path)
@@ -232,22 +287,29 @@ class TrainingAgent:
         if volatility_level == "High" and signal == "BUY_CANDIDATE":
             signal = "HOLD"
 
+        prediction_confidence = round(float(analyst_score), 3) if analyst_score is not None else 0.5
+        confidence_level = self._confidence_level(prediction_confidence)
+
         return {
             "success": True,
             "agent_goal": "Generate a trading signal from analyst features.",
             "signal_source": "fallback_rule",
             "model_signal": signal,
-            "prediction_confidence": round(float(analyst_score), 3) if analyst_score is not None else 0.5,
+            "raw_model_signal": signal,
+            "prediction_confidence": prediction_confidence,
+            "confidence_level": confidence_level,
             "agent_decision": f"Used fallback rule because {reason}",
             "signal_for_next_agent": {
                 "symbol": analysis_result.get("symbol"),
                 "signal": signal,
                 "signal_source": "fallback_rule",
-                "prediction_confidence": round(float(analyst_score), 3) if analyst_score is not None else 0.5,
+                "prediction_confidence": prediction_confidence,
+                "confidence_level": confidence_level,
+                "raw_model_signal": signal,
                 "analyst_score": analyst_score,
                 "volatility_level": volatility_level
             },
-            "summary": f"Fallback signal generated: {signal}."
+            "summary": f"Fallback signal generated: {signal} with {confidence_level.lower()} confidence."
         }
 
     def predict_signal(self, analysis_result: dict) -> dict:
@@ -274,7 +336,6 @@ class TrainingAgent:
             if features.get(col) is None
         ]
 
-        # If too many technical features are missing, model prediction is unreliable.
         if len(missing_features) > 3:
             return self._fallback_signal(
                 analysis_result,
@@ -310,25 +371,34 @@ class TrainingAgent:
 
                 prediction_confidence = max(probabilities.values())
 
+            confidence_level = self._confidence_level(prediction_confidence)
+
             return {
                 "success": True,
                 "agent_goal": "Generate a trading signal from analyst features using a trained model.",
                 "signal_source": "trained_signal_model",
                 "model_signal": prediction,
+                "raw_model_signal": prediction,
                 "prediction_confidence": prediction_confidence,
+                "confidence_level": confidence_level,
                 "probabilities": probabilities,
                 "model_path": str(self.model_path),
-                "agent_decision": "The trained signal model generated a trading signal.",
+                "agent_decision": (
+                    "The trained signal model generated a trading signal with "
+                    f"{confidence_level.lower()} confidence."
+                ),
                 "signal_for_next_agent": {
                     "symbol": analysis_result.get("symbol"),
                     "signal": prediction,
                     "signal_source": "trained_signal_model",
                     "prediction_confidence": prediction_confidence,
+                    "confidence_level": confidence_level,
+                    "raw_model_signal": prediction,
                     "probabilities": probabilities,
                     "analyst_score": analysis_result.get("analyst_score"),
                     "volatility_level": analysis_result.get("volatility_level")
                 },
-                "summary": f"Signal model prediction: {prediction}."
+                "summary": f"Signal model prediction: {prediction} with {confidence_level.lower()} confidence."
             }
 
         except Exception as e:
