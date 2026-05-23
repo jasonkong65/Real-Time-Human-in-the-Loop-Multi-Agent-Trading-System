@@ -20,6 +20,36 @@ class RewardAgent:
     This does not execute real trades.
     """
 
+    PENDING_COLUMNS = [
+        "decision_id",
+        "symbol",
+        "entry_price",
+        "entry_time_utc",
+        "q_state",
+        "risk_action",
+        "final_signal",
+        "risk_level",
+        "status"
+    ]
+
+    HISTORY_COLUMNS = [
+        "decision_id",
+        "symbol",
+        "entry_price",
+        "entry_time_utc",
+        "q_state",
+        "risk_action",
+        "final_signal",
+        "risk_level",
+        "status",
+        "latest_close",
+        "latest_date",
+        "future_return",
+        "reward",
+        "updated_at_utc",
+        "q_update_summary"
+    ]
+
     def __init__(
         self,
         pending_path: str = "data/pending_rewards.csv",
@@ -34,12 +64,39 @@ class RewardAgent:
     def _now_utc(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    def _load_csv(self, path: Path) -> pd.DataFrame:
-        if path.exists():
-            return pd.read_csv(path)
-        return pd.DataFrame()
+    def _load_csv(self, path: Path, expected_columns=None) -> pd.DataFrame:
+        """
+        Safely load a CSV file.
 
-    def _save_csv(self, df: pd.DataFrame, path: Path):
+        If the file does not exist or is empty, return an empty DataFrame
+        with expected columns. This prevents pandas EmptyDataError.
+        """
+        if expected_columns is None:
+            expected_columns = []
+
+        if not path.exists() or path.stat().st_size == 0:
+            return pd.DataFrame(columns=expected_columns)
+
+        try:
+            return pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame(columns=expected_columns)
+        except Exception:
+            return pd.DataFrame(columns=expected_columns)
+
+    def _save_csv(self, df: pd.DataFrame, path: Path, expected_columns=None):
+        """
+        Safely save CSV.
+
+        If df is empty, still save headers so future pd.read_csv() will not fail.
+        """
+        if expected_columns is None:
+            expected_columns = []
+
+        if df.empty and expected_columns:
+            df = pd.DataFrame(columns=expected_columns)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=False)
 
     def _parse_date(self, value):
@@ -159,9 +216,12 @@ class RewardAgent:
             "status": "pending"
         }
 
-        pending_df = self._load_csv(self.pending_path)
-        pending_df = pd.concat([pending_df, pd.DataFrame([new_row])], ignore_index=True)
-        self._save_csv(pending_df, self.pending_path)
+        pending_df = self._load_csv(self.pending_path, self.PENDING_COLUMNS)
+        pending_df = pd.concat(
+            [pending_df, pd.DataFrame([new_row])],
+            ignore_index=True
+        )
+        self._save_csv(pending_df, self.pending_path, self.PENDING_COLUMNS)
 
         return {
             "success": True,
@@ -183,7 +243,7 @@ class RewardAgent:
         than the recorded entry date. This prevents immediate same-day updates
         from being treated as delayed rewards.
         """
-        pending_df = self._load_csv(self.pending_path)
+        pending_df = self._load_csv(self.pending_path, self.PENDING_COLUMNS)
 
         if pending_df.empty:
             return {
@@ -194,18 +254,7 @@ class RewardAgent:
                 "summary": "No pending reward decisions found."
             }
 
-        required_cols = [
-            "decision_id",
-            "symbol",
-            "entry_price",
-            "entry_time_utc",
-            "q_state",
-            "risk_action",
-            "final_signal",
-            "risk_level",
-            "status"
-        ]
-
+        required_cols = self.PENDING_COLUMNS
         missing_cols = [c for c in required_cols if c not in pending_df.columns]
 
         if missing_cols:
@@ -258,7 +307,6 @@ class RewardAgent:
                 })
                 continue
 
-            # Real delayed reward: only update when a later market close is available.
             if latest_date <= entry_date:
                 still_pending_rows.append(row_dict)
                 updates.append({
@@ -328,18 +376,16 @@ class RewardAgent:
                 "q_update": update_result
             })
 
-        # Keep only unresolved pending decisions
         new_pending_df = pd.DataFrame(still_pending_rows)
-        self._save_csv(new_pending_df, self.pending_path)
+        self._save_csv(new_pending_df, self.pending_path, self.PENDING_COLUMNS)
 
-        # Append completed decisions to history
         if completed_rows:
-            history_df = self._load_csv(self.history_path)
+            history_df = self._load_csv(self.history_path, self.HISTORY_COLUMNS)
             history_df = pd.concat(
                 [history_df, pd.DataFrame(completed_rows)],
                 ignore_index=True
             )
-            self._save_csv(history_df, self.history_path)
+            self._save_csv(history_df, self.history_path, self.HISTORY_COLUMNS)
 
         updated_count = sum(1 for u in updates if u.get("updated"))
         skipped_count = sum(1 for u in updates if not u.get("updated"))

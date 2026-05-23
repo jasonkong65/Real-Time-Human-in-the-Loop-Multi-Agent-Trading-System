@@ -1,3 +1,3 @@
 decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,status
-38dede75,AAPL,302.25,2026-05-21 03:43:34,High|Low|SELL_RISK|NEUTRAL|Medium,DOWNGRADE_TO_HOLD,SELL_RISK,High,pending
-366c8c36,AAPL,302.25,2026-05-21 04:18:39,High|Low|SELL_RISK|NEUTRAL|Medium,KEEP_SIGNAL,SELL_RISK,High,pending
+0d8881a9,AAPL,308.82,2026-05-23 05:38:56,High|Low|SELL_RISK|NEUTRAL|Medium,BLOCK_TRADE,BLOCKED,Critical,pending
+7997ea74,AAPL,308.82,2026-05-23 05:40:13,High|Low|SELL_RISK|NEUTRAL|Medium,BLOCK_TRADE,BLOCKED,Critical,pending
