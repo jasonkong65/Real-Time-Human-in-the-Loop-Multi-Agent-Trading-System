@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, Any, Optional
 
 import joblib
 import pandas as pd
@@ -18,9 +19,15 @@ class TrainingAgent:
     - BUY_CANDIDATE
     - HOLD
     - SELL_RISK
+
+    This version is compatible with app.py calls such as:
+    - train_or_load_model(...)
+    - generate_signal(...)
+    - predict_signal(...)
     """
 
     def __init__(self, model_path: str = "models/signal_model.pkl"):
+        self.base_model_path = Path(model_path)
         self.model_path = Path(model_path)
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -35,16 +42,126 @@ class TrainingAgent:
             "validation_confidence_score"
         ]
 
+    # --------------------------------------------------
+    # Model path helpers
+    # --------------------------------------------------
+    def _set_symbol_model_path(self, symbol: Optional[str] = None):
+        """
+        Use one model per symbol when symbol is available.
+        Example:
+        models/signal_model_AAPL.pkl
+        """
+        if symbol:
+            clean_symbol = str(symbol).upper().strip()
+            self.model_path = Path("models") / f"signal_model_{clean_symbol}.pkl"
+        else:
+            self.model_path = self.base_model_path
+
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+
     def model_exists(self) -> bool:
-        """
-        Check whether a trained model already exists.
-        """
         return self.model_path.exists()
 
-    def load_existing_model_info(self) -> dict:
+    # --------------------------------------------------
+    # Main app.py-compatible training method
+    # --------------------------------------------------
+    def train_or_load_model(
+        self,
+        historical_data: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        force_retrain: bool = False,
+        csv_path: str = "data/historical_data.csv"
+    ) -> Dict[str, Any]:
         """
-        Load metadata of an existing trained model without retraining.
+        Main method expected by app.py.
+
+        Logic:
+        1. Set per-symbol model path if symbol is provided.
+        2. If model exists and force_retrain=False, load model info.
+        3. Else train from historical_data if available.
+        4. Else train from local CSV.
+        5. If training fails but old model exists, load old model instead.
         """
+
+        if symbol is None and isinstance(historical_data, dict):
+            symbol = historical_data.get("symbol")
+
+        self._set_symbol_model_path(symbol)
+
+        if self.model_exists() and not force_retrain:
+            return self.load_existing_model_info()
+
+        training_result = None
+
+        if isinstance(historical_data, dict) and historical_data.get("success"):
+            training_result = self.train_from_historical_data(historical_data)
+
+        if not training_result or not training_result.get("success"):
+            csv_training_result = self.train_from_csv(csv_path)
+
+            if csv_training_result.get("success"):
+                return csv_training_result
+
+            if training_result is not None:
+                return training_result
+
+            return csv_training_result
+
+        return training_result
+
+    # Compatibility aliases
+    def train_or_load_signal_model(
+        self,
+        historical_data: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        force_retrain: bool = False
+    ) -> Dict[str, Any]:
+        return self.train_or_load_model(
+            historical_data=historical_data,
+            symbol=symbol,
+            force_retrain=force_retrain
+        )
+
+    def load_or_train_model(
+        self,
+        historical_data: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        force_retrain: bool = False
+    ) -> Dict[str, Any]:
+        return self.train_or_load_model(
+            historical_data=historical_data,
+            symbol=symbol,
+            force_retrain=force_retrain
+        )
+
+    def run_training(
+        self,
+        historical_data: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        force_retrain: bool = False
+    ) -> Dict[str, Any]:
+        return self.train_or_load_model(
+            historical_data=historical_data,
+            symbol=symbol,
+            force_retrain=force_retrain
+        )
+
+    def run(
+        self,
+        historical_data: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None,
+        force_retrain: bool = False
+    ) -> Dict[str, Any]:
+        return self.train_or_load_model(
+            historical_data=historical_data,
+            symbol=symbol,
+            force_retrain=force_retrain
+        )
+
+    # --------------------------------------------------
+    # Load existing model metadata
+    # --------------------------------------------------
+    def load_existing_model_info(self) -> Dict[str, Any]:
         if not self.model_path.exists():
             return {
                 "success": False,
@@ -66,6 +183,9 @@ class TrainingAgent:
                 "trained_at": model_bundle.get("trained_at"),
                 "feature_columns": model_bundle.get("feature_columns"),
                 "label_rule": model_bundle.get("label_rule"),
+                "num_samples": model_bundle.get("num_samples"),
+                "train_accuracy": model_bundle.get("train_accuracy"),
+                "test_accuracy": model_bundle.get("test_accuracy"),
                 "summary": f"Loaded existing signal model from {self.model_path}."
             }
 
@@ -78,11 +198,16 @@ class TrainingAgent:
                 "model_path": str(self.model_path)
             }
 
+    # --------------------------------------------------
+    # Training helpers
+    # --------------------------------------------------
     def _confidence_level(self, prediction_confidence):
-        """
-        Convert prediction probability into a readable confidence level.
-        """
         if prediction_confidence is None:
+            return "Unknown"
+
+        try:
+            prediction_confidence = float(prediction_confidence)
+        except Exception:
             return "Unknown"
 
         if prediction_confidence >= 0.65:
@@ -93,9 +218,6 @@ class TrainingAgent:
             return "Low"
 
     def _make_label(self, future_return: float) -> str:
-        """
-        Convert future 5-day return into a training label.
-        """
         if future_return > 0.015:
             return "BUY_CANDIDATE"
         elif future_return < -0.015:
@@ -103,37 +225,36 @@ class TrainingAgent:
         else:
             return "HOLD"
 
-    def train_from_historical_data(self, historical_data: dict) -> dict:
-        """
-        Train signal model using historical_data returned by DataAgent or HistoricalDataAgent.
-        """
-        if not historical_data.get("success"):
+    def train_from_historical_data(self, historical_data: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(historical_data, dict) or not historical_data.get("success"):
             return {
                 "success": False,
                 "agent_goal": "Train a lightweight signal model from historical market data.",
                 "agent_decision": "Training skipped because historical data is unavailable.",
-                "summary": historical_data.get("error", "Historical data unavailable."),
+                "summary": (
+                    historical_data.get("error", "Historical data unavailable.")
+                    if isinstance(historical_data, dict)
+                    else "Historical data unavailable."
+                ),
                 "model_path": str(self.model_path)
             }
+
+        symbol = historical_data.get("symbol")
+        if symbol:
+            self._set_symbol_model_path(symbol)
 
         price_records = historical_data.get("prices", [])
         return self.train_from_price_records(price_records)
 
-    def train_from_csv(self, csv_path: str = "data/historical_data.csv") -> dict:
-        """
-        Train signal model using a local CSV file.
-
-        Expected columns:
-        date, open, high, low, close, volume
-        """
+    def train_from_csv(self, csv_path: str = "data/historical_data.csv") -> Dict[str, Any]:
         csv_path = Path(csv_path)
 
-        if not csv_path.exists():
+        if not csv_path.exists() or csv_path.stat().st_size == 0:
             return {
                 "success": False,
                 "agent_goal": "Train a lightweight signal model from local CSV data.",
-                "agent_decision": "Training skipped because local CSV data was not found.",
-                "summary": f"Training CSV not found at {csv_path}.",
+                "agent_decision": "Training skipped because local CSV data was not found or is empty.",
+                "summary": f"Training CSV not found or empty at {csv_path}.",
                 "model_path": str(self.model_path)
             }
 
@@ -165,11 +286,17 @@ class TrainingAgent:
                 "model_path": str(self.model_path)
             }
 
-    def train_from_price_records(self, price_records: list) -> dict:
-        """
-        Train a Random Forest signal model using OHLCV price records.
-        """
+    def train_from_price_records(self, price_records: list) -> Dict[str, Any]:
         agent_goal = "Train a lightweight stock signal model using engineered technical features."
+
+        if not price_records:
+            return {
+                "success": False,
+                "agent_goal": agent_goal,
+                "agent_decision": "Training failed because no price records were provided.",
+                "summary": "No price records available for training.",
+                "model_path": str(self.model_path)
+            }
 
         feature_df = build_trading_features(price_records)
 
@@ -184,12 +311,17 @@ class TrainingAgent:
 
         feature_df["validation_confidence_score"] = 1.0
 
-        feature_df["future_return_5"] = feature_df["close"].shift(-5) / feature_df["close"] - 1
+        feature_df["future_return_5"] = (
+            feature_df["close"].shift(-5) / feature_df["close"] - 1
+        )
+
         feature_df["target_signal"] = feature_df["future_return_5"].apply(
             lambda x: self._make_label(x) if pd.notna(x) else None
         )
 
-        model_df = feature_df.dropna(subset=self.feature_columns + ["target_signal"]).copy()
+        model_df = feature_df.dropna(
+            subset=self.feature_columns + ["target_signal"]
+        ).copy()
 
         if len(model_df) < 30:
             return {
@@ -220,7 +352,7 @@ class TrainingAgent:
         y_test = y.iloc[split_index:]
 
         model = RandomForestClassifier(
-            n_estimators=100,
+            n_estimators=120,
             max_depth=5,
             random_state=42,
             class_weight="balanced"
@@ -240,7 +372,10 @@ class TrainingAgent:
             "model": model,
             "feature_columns": self.feature_columns,
             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "label_rule": "future_return_5 > 1.5% = BUY_CANDIDATE; < -1.5% = SELL_RISK; otherwise HOLD",
+            "label_rule": (
+                "future_return_5 > 1.5% = BUY_CANDIDATE; "
+                "< -1.5% = SELL_RISK; otherwise HOLD"
+            ),
             "num_samples": len(model_df),
             "train_accuracy": round(train_accuracy, 3),
             "test_accuracy": round(test_accuracy, 3) if test_accuracy is not None else None
@@ -261,25 +396,108 @@ class TrainingAgent:
             "test_accuracy": round(test_accuracy, 3) if test_accuracy is not None else None,
             "label_distribution": label_distribution,
             "feature_columns": self.feature_columns,
+            "label_rule": model_bundle["label_rule"],
             "summary": (
                 f"Signal model trained with {len(model_df)} samples. "
                 f"Train accuracy={train_accuracy:.2f}, "
-                f"test accuracy={test_accuracy:.2f}." if test_accuracy is not None
+                f"test accuracy={test_accuracy:.2f}."
+                if test_accuracy is not None
                 else f"Signal model trained with {len(model_df)} samples."
             )
         }
 
-    def _fallback_signal(self, analysis_result: dict, reason: str) -> dict:
+    # --------------------------------------------------
+    # Signal generation
+    # --------------------------------------------------
+    def generate_signal(
+        self,
+        analysis_result: Dict[str, Any],
+        training_result: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Fallback when the trained model is unavailable or cannot be used.
+        Main method expected by app.py.
+        Generate signal after Training Agent has loaded/trained the model.
         """
+
+        if symbol is None:
+            symbol = analysis_result.get("symbol")
+
+        if symbol:
+            self._set_symbol_model_path(symbol)
+
+        if isinstance(training_result, dict):
+            model_path = training_result.get("model_path")
+            if model_path:
+                self.model_path = Path(model_path)
+
+        return self.predict_signal(analysis_result)
+
+    def generate_trading_signal(
+        self,
+        analysis_result: Dict[str, Any],
+        training_result: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.generate_signal(
+            analysis_result=analysis_result,
+            training_result=training_result,
+            symbol=symbol
+        )
+
+    def run_signal_model(
+        self,
+        analysis_result: Dict[str, Any],
+        training_result: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.generate_signal(
+            analysis_result=analysis_result,
+            training_result=training_result,
+            symbol=symbol
+        )
+
+    def predict(
+        self,
+        analysis_result: Dict[str, Any],
+        training_result: Optional[Dict[str, Any]] = None,
+        symbol: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.generate_signal(
+            analysis_result=analysis_result,
+            training_result=training_result,
+            symbol=symbol
+        )
+
+    def _fallback_signal(self, analysis_result: Dict[str, Any], reason: str) -> Dict[str, Any]:
         analyst_signal = analysis_result.get("analyst_signal")
         analyst_score = analysis_result.get("analyst_score", 0.5)
         volatility_level = analysis_result.get("volatility_level")
 
-        if analyst_signal == "BULLISH_WATCH" and analyst_score >= 0.7:
+        try:
+            analyst_score_float = float(analyst_score)
+        except Exception:
+            analyst_score_float = 0.5
+
+        bullish_signals = [
+            "BULLISH",
+            "BULLISH_WATCH",
+            "QUOTE_BULLISH",
+            "HISTORICAL_BULLISH",
+            "BUY_CANDIDATE"
+        ]
+
+        bearish_signals = [
+            "BEARISH",
+            "BEARISH_RISK",
+            "QUOTE_BEARISH",
+            "HISTORICAL_BEARISH",
+            "SELL_RISK"
+        ]
+
+        if analyst_signal in bullish_signals or analyst_score_float >= 0.70:
             signal = "BUY_CANDIDATE"
-        elif analyst_signal == "BEARISH_RISK" or analyst_score <= 0.35:
+        elif analyst_signal in bearish_signals or analyst_score_float <= 0.35:
             signal = "SELL_RISK"
         else:
             signal = "HOLD"
@@ -287,7 +505,7 @@ class TrainingAgent:
         if volatility_level == "High" and signal == "BUY_CANDIDATE":
             signal = "HOLD"
 
-        prediction_confidence = round(float(analyst_score), 3) if analyst_score is not None else 0.5
+        prediction_confidence = round(analyst_score_float, 3)
         confidence_level = self._confidence_level(prediction_confidence)
 
         return {
@@ -306,22 +524,30 @@ class TrainingAgent:
                 "prediction_confidence": prediction_confidence,
                 "confidence_level": confidence_level,
                 "raw_model_signal": signal,
-                "analyst_score": analyst_score,
+                "analyst_score": analyst_score_float,
                 "volatility_level": volatility_level
             },
-            "summary": f"Fallback signal generated: {signal} with {confidence_level.lower()} confidence."
+            "summary": (
+                f"Fallback signal generated: {signal} "
+                f"with {confidence_level.lower()} confidence."
+            )
         }
 
-    def predict_signal(self, analysis_result: dict) -> dict:
+    def predict_signal(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Predict trading signal using the trained model.
         If the model is unavailable or features are incomplete, use fallback rules.
         """
-        if not analysis_result.get("success"):
+
+        if not isinstance(analysis_result, dict) or not analysis_result.get("success"):
             return self._fallback_signal(
-                analysis_result,
+                analysis_result if isinstance(analysis_result, dict) else {},
                 reason="Analyst Agent did not produce a successful analysis."
             )
+
+        symbol = analysis_result.get("symbol")
+        if symbol:
+            self._set_symbol_model_path(symbol)
 
         if not self.model_path.exists():
             return self._fallback_signal(
@@ -345,7 +571,7 @@ class TrainingAgent:
         try:
             model_bundle = joblib.load(self.model_path)
             model = model_bundle["model"]
-            feature_columns = model_bundle["feature_columns"]
+            feature_columns = model_bundle.get("feature_columns", self.feature_columns)
 
             model_input = {}
 
@@ -398,7 +624,10 @@ class TrainingAgent:
                     "analyst_score": analysis_result.get("analyst_score"),
                     "volatility_level": analysis_result.get("volatility_level")
                 },
-                "summary": f"Signal model prediction: {prediction} with {confidence_level.lower()} confidence."
+                "summary": (
+                    f"Signal model prediction: {prediction} "
+                    f"with {confidence_level.lower()} confidence."
+                )
             }
 
         except Exception as e:

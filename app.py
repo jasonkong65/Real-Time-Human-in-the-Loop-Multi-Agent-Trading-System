@@ -33,8 +33,8 @@ def call_agent_method(agent, method_names, *args, **kwargs):
     """
     Robust helper for calling agent methods.
 
-    This makes app.py more tolerant if your agent method names are slightly different.
     It first tries keyword arguments, then positional arguments.
+    This makes app.py more tolerant if agent method names are slightly different.
     """
     errors = []
 
@@ -66,12 +66,16 @@ def get_nested(data, keys, default=None):
     Safely get nested dictionary values.
     """
     current = data
+
     for key in keys:
         if not isinstance(current, dict):
             return default
+
         current = current.get(key)
+
         if current is None:
             return default
+
     return current
 
 
@@ -82,9 +86,14 @@ def build_fallback_signal_result(symbol, analysis_result):
     analyst_score = analysis_result.get("analyst_score", 0.5)
     volatility_level = analysis_result.get("volatility_level", "Unknown")
 
-    if analyst_score >= 0.7:
+    try:
+        analyst_score_float = float(analyst_score)
+    except Exception:
+        analyst_score_float = 0.5
+
+    if analyst_score_float >= 0.7:
         model_signal = "BUY_CANDIDATE"
-    elif analyst_score <= 0.4:
+    elif analyst_score_float <= 0.4:
         model_signal = "SELL_RISK"
     else:
         model_signal = "HOLD"
@@ -94,16 +103,16 @@ def build_fallback_signal_result(symbol, analysis_result):
         "agent_goal": "Generate fallback trading signal from analyst features.",
         "signal_source": "fallback_rule",
         "model_signal": model_signal,
-        "prediction_confidence": analyst_score,
+        "prediction_confidence": analyst_score_float,
         "confidence_level": "Medium",
         "agent_decision": "Used fallback rule because signal model method was unavailable.",
         "signal_for_next_agent": {
             "symbol": symbol,
             "signal": model_signal,
             "signal_source": "fallback_rule",
-            "prediction_confidence": analyst_score,
+            "prediction_confidence": analyst_score_float,
             "confidence_level": "Medium",
-            "analyst_score": analyst_score,
+            "analyst_score": analyst_score_float,
             "volatility_level": volatility_level
         },
         "summary": f"Fallback signal generated: {model_signal}."
@@ -129,6 +138,7 @@ def build_fallback_risk_result(symbol, signal_result):
     return {
         "success": True,
         "agent_goal": "Fallback risk adjustment.",
+        "symbol": symbol,
         "original_signal": model_signal,
         "risk_action": "KEEP_SIGNAL",
         "final_signal": model_signal,
@@ -153,12 +163,73 @@ def build_fallback_risk_result(symbol, signal_result):
 
 
 def make_llm_agent():
+    """
+    Safely create Groq LLM Report Agent.
+    """
     if LLMReportAgent is None:
         return None
+
     try:
         return LLMReportAgent()
     except Exception:
         return None
+
+
+def is_direct_trading_question(text: str) -> bool:
+    """
+    Detect whether the user is asking for direct buy/sell/position/leverage advice.
+    The Financial Simplifier should not answer these questions.
+    """
+    if not text:
+        return False
+
+    lowered = text.lower()
+
+    trading_keywords = [
+        "should i buy",
+        "should i sell",
+        "can i buy",
+        "can i sell",
+        "do i buy",
+        "do i sell",
+        "buy now",
+        "sell now",
+        "is it worth buying",
+        "worth buying",
+        "worth selling",
+        "clear position",
+        "close position",
+        "add position",
+        "increase position",
+        "reduce position",
+        "add leverage",
+        "use leverage",
+        "margin",
+        "加仓",
+        "加倉",
+        "清仓",
+        "清倉",
+        "买入",
+        "買入",
+        "卖出",
+        "賣出",
+        "加杠杆",
+        "加槓桿",
+        "加桿",
+        "加杆",
+        "值得买吗",
+        "值得買嗎",
+        "该买吗",
+        "該買嗎",
+        "该卖吗",
+        "該賣嗎",
+        "要不要买",
+        "要不要買",
+        "要不要卖",
+        "要不要賣"
+    ]
+
+    return any(keyword in lowered for keyword in trading_keywords)
 
 
 # -----------------------------
@@ -168,14 +239,14 @@ st.title("Human-in-the-Loop Multi-Agent Trading System")
 
 st.subheader(
     "Data Agent + Validation Agent + Two-Stage Analyst Agent + "
-    "Training Agent + Q-learning Risk Agent + Reward Agent + Gemini Report Agent"
+    "Training Agent + Q-learning Risk Agent + Reward Agent + Groq Report Agent"
 )
 
 st.info(
     "This prototype collects market data from Finnhub and Alpha Vantage, validates "
     "multi-source consistency, performs two-stage market analysis, trains or loads a "
     "lightweight signal model, applies rule-based plus Q-learning risk control, records "
-    "paper decisions for delayed reward updates, and uses Gemini to explain results."
+    "paper decisions for delayed reward updates, and uses Groq to explain results."
 )
 
 
@@ -186,7 +257,7 @@ symbol = st.text_input("Enter stock symbol", value="AAPL")
 clean_symbol = symbol.upper().strip()
 
 user_question = st.text_input(
-    "Ask the Gemini Report Agent about this stock",
+    "Ask the Groq Report Agent about this stock",
     value="Should I buy this stock now?"
 )
 
@@ -360,6 +431,10 @@ if run_pipeline:
                 signal_result=signal_result
             )
 
+        # Store latest risk result for manual Q-learning feedback
+        st.session_state["last_risk_result"] = risk_result
+        st.session_state["last_symbol"] = clean_symbol
+
         # -----------------------------
         # 8. Reward Agent
         # -----------------------------
@@ -371,23 +446,23 @@ if run_pipeline:
             )
 
         # -----------------------------
-        # 9. Gemini LLM Recommendation / Report Agent
+        # 9. Groq LLM Recommendation / Report Agent
         # -----------------------------
         llm_single_stock_report = {
             "success": False,
             "llm_available": False,
             "plain_language_report": (
-                "Gemini Report Agent is not available. "
-                "Please check agents/llm_report_agent.py, google-genai installation, "
-                "and GEMINI_API_KEY."
+                "Groq Report Agent is not available. "
+                "Please check agents/llm_report_agent.py, groq installation, "
+                "and GROQ_API_KEY."
             ),
-            "summary": "Gemini Report Agent unavailable."
+            "summary": "Groq Report Agent unavailable."
         }
 
         llm_report_agent = make_llm_agent()
 
         if llm_report_agent is not None:
-            with st.spinner("Gemini Report Agent is generating a plain-language explanation..."):
+            with st.spinner("Groq Report Agent is generating a plain-language explanation..."):
                 llm_single_stock_report = llm_report_agent.generate_single_stock_report(
                     user_question=user_question,
                     validation_result=validation_result,
@@ -412,11 +487,6 @@ if run_pipeline:
         model_signal = (
             signal_result.get("model_signal")
             or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
-        )
-
-        model_confidence = (
-            signal_result.get("confidence_level")
-            or get_nested(signal_result, ["signal_for_next_agent", "confidence_level"], "Unknown")
         )
 
         risk_level = (
@@ -452,7 +522,7 @@ if run_pipeline:
         st.write(f"**Signal Model Decision:** {signal_result.get('agent_decision', 'N/A')}")
         st.write(f"**Risk Decision:** {risk_result.get('agent_decision', 'N/A')}")
         st.write(f"**Reward Agent:** {reward_record_result.get('summary', 'N/A')}")
-        st.write(f"**Gemini Report Agent:** {llm_single_stock_report.get('summary', 'N/A')}")
+        st.write(f"**Groq Report Agent:** {llm_single_stock_report.get('summary', 'N/A')}")
 
         if validation_result.get("summary"):
             st.success(validation_result.get("summary"))
@@ -465,6 +535,12 @@ if run_pipeline:
 
         if risk_result.get("summary"):
             st.success(risk_result.get("summary"))
+
+        if reward_record_result.get("summary"):
+            if reward_record_result.get("success"):
+                st.success(reward_record_result.get("summary"))
+            else:
+                st.warning(reward_record_result.get("summary"))
 
         # -----------------------------
         # Detailed outputs
@@ -526,22 +602,21 @@ if run_pipeline:
         st.header("8. Auto Delayed Reward Update Output")
         st.json(auto_reward_update_result)
 
-        st.header("9. Gemini Recommendation / Report Agent Output")
+        st.header("9. Groq Recommendation / Report Agent Output")
 
         if llm_single_stock_report.get("llm_available"):
-            st.success("Gemini explanation generated successfully.")
+            st.success("Groq explanation generated successfully.")
         else:
             st.warning(
-                "Gemini API was not available. The system used a fallback explanation "
-                "or skipped LLM output. Check GEMINI_API_KEY and google-genai."
+                "Groq API was not available. The system used a fallback explanation "
+                "or skipped LLM output. Check GROQ_API_KEY and groq installation."
             )
 
         st.markdown(llm_single_stock_report.get("plain_language_report", ""))
 
-        with st.expander("Show Gemini Report Agent JSON"):
+        with st.expander("Show Groq Report Agent JSON"):
             st.json(llm_single_stock_report)
 
-        # Reasoning expanders
         with st.expander("Show Validation Reasoning Steps"):
             for step in validation_result.get("reasoning_steps", []):
                 st.write(f"- {step}")
@@ -562,50 +637,64 @@ if run_pipeline:
             with st.expander("Show Stage 2 Historical Analysis"):
                 st.json(analysis_result.get("stage_2_historical_analysis"))
 
-        # -----------------------------
-        # Manual Q-learning feedback
-        # -----------------------------
-        st.divider()
-        st.header("Manual Q-learning Feedback Demo")
-
-        st.info(
-            "This is a manual fallback demo for Q-learning feedback. "
-            "The system also records paper decisions and can automatically update delayed rewards "
-            "when later market prices become available."
-        )
-
-        manual_future_return = st.number_input(
-            "Enter simulated future return for manual Q-learning update",
-            value=0.0,
-            step=0.01,
-            format="%.3f"
-        )
-
-        if st.button("Update Risk Q-table Manually"):
-            q_state = risk_result.get("q_state")
-            risk_action = risk_result.get("risk_action")
-            final_signal = risk_result.get("final_signal")
-            volatility_level = risk_level
-
-            reward = risk_agent.calculate_reward(
-                final_signal=final_signal,
-                future_return=manual_future_return,
-                volatility_level=volatility_level
-            )
-
-            q_update_result = risk_agent.update_q_value(
-                state=q_state,
-                action=risk_action,
-                reward=reward
-            )
-
-            st.subheader("Manual Q-learning Update Output")
-            st.json(q_update_result)
-
     except Exception as e:
         st.error("The agent pipeline crashed.")
         st.exception(e)
         st.code(traceback.format_exc())
+
+
+# -----------------------------
+# Manual Q-learning feedback
+# -----------------------------
+st.divider()
+
+st.header("Manual Q-learning Feedback Demo")
+
+st.info(
+    "This is a manual fallback demo for Q-learning feedback. "
+    "The system also records paper decisions and can automatically update delayed rewards "
+    "when later market prices become available."
+)
+
+if "last_risk_result" not in st.session_state:
+    st.warning("Run the Agent Pipeline first before using manual Q-learning feedback.")
+else:
+    last_risk_result = st.session_state["last_risk_result"]
+    last_symbol = st.session_state.get("last_symbol", "UNKNOWN")
+
+    st.write(f"Latest stored symbol: **{last_symbol}**")
+    st.write(f"Latest final signal: **{last_risk_result.get('final_signal', 'N/A')}**")
+    st.write(f"Latest risk action: **{last_risk_result.get('risk_action', 'N/A')}**")
+    st.write(f"Latest risk level: **{last_risk_result.get('risk_level', 'N/A')}**")
+    st.write(f"Latest Q-state: `{last_risk_result.get('q_state', 'N/A')}`")
+
+    manual_future_return = st.number_input(
+        "Enter simulated future return for manual Q-learning update",
+        value=0.0,
+        step=0.01,
+        format="%.3f",
+        help=(
+            "Example: 0.03 means the stock increased by 3%; "
+            "-0.03 means the stock decreased by 3%."
+        )
+    )
+
+    if st.button("Update Risk Q-table Manually"):
+        feedback_risk_agent = RiskAgent()
+
+        update_result = feedback_risk_agent.update_from_feedback(
+            risk_result=last_risk_result,
+            future_return=manual_future_return
+        )
+
+        st.subheader("Manual Q-learning Update Output")
+
+        if update_result.get("success"):
+            st.success(update_result.get("summary", "Q-table updated successfully."))
+        else:
+            st.error(update_result.get("summary", "Q-table update failed."))
+
+        st.json(update_result)
 
 
 # -----------------------------
@@ -647,7 +736,7 @@ screen_period = st.selectbox(
 )
 
 screener_question = st.text_input(
-    "Ask the Gemini Report Agent about the screener result",
+    "Ask the Groq Report Agent about the screener result",
     value="Which stocks look strongest, which stocks need caution, and why?",
     key="screener_question"
 )
@@ -709,23 +798,29 @@ if st.button("Run S&P-style Screener"):
             "reason"
         ]
 
+        existing_buy_cols = [
+            col for col in buy_display_cols
+            if col in top_buy_df.columns
+        ]
+
         st.dataframe(
-            top_buy_df[buy_display_cols],
+            top_buy_df[existing_buy_cols],
             use_container_width=True,
             hide_index=True
         )
 
-        overbought_df = top_buy_df[
-            top_buy_df["screen_signal"] == "BUY_WATCHLIST_OVERBOUGHT"
-        ]
+        if "screen_signal" in top_buy_df.columns:
+            overbought_df = top_buy_df[
+                top_buy_df["screen_signal"] == "BUY_WATCHLIST_OVERBOUGHT"
+            ]
 
-        if not overbought_df.empty:
-            overbought_symbols = ", ".join(overbought_df["symbol"].tolist())
-            st.warning(
-                "Some high-ranked stocks are marked as BUY_WATCHLIST_OVERBOUGHT "
-                f"because their RSI is high: {overbought_symbols}. "
-                "They may have strong momentum but higher entry risk."
-            )
+            if not overbought_df.empty:
+                overbought_symbols = ", ".join(overbought_df["symbol"].tolist())
+                st.warning(
+                    "Some high-ranked stocks are marked as BUY_WATCHLIST_OVERBOUGHT "
+                    f"because their RSI is high: {overbought_symbols}. "
+                    "They may have strong momentum but higher entry risk."
+                )
     else:
         st.warning("No buy candidates were generated.")
 
@@ -761,51 +856,56 @@ if st.button("Run S&P-style Screener"):
             "reason"
         ]
 
+        existing_risk_cols = [
+            col for col in risk_display_cols
+            if col in top_risk_df.columns
+        ]
+
         st.dataframe(
-            top_risk_df[risk_display_cols],
+            top_risk_df[existing_risk_cols],
             use_container_width=True,
             hide_index=True
         )
 
-        strong_sell_risk_df = top_risk_df[
-            top_risk_df["screen_signal"] == "SELL_RISK"
-        ]
+        if "screen_signal" in top_risk_df.columns:
+            strong_sell_risk_df = top_risk_df[
+                top_risk_df["screen_signal"] == "SELL_RISK"
+            ]
 
-        if strong_sell_risk_df.empty:
-            st.info(
-                "No strong SELL_RISK signal was detected in this run. "
-                "This table shows the relatively highest-risk stocks within the selected universe."
-            )
+            if strong_sell_risk_df.empty:
+                st.info(
+                    "No strong SELL_RISK signal was detected in this run. "
+                    "This table shows the relatively highest-risk stocks within the selected universe."
+                )
     else:
         st.warning("No caution candidates were generated.")
 
-    # Gemini explanation for screener
-    st.subheader("Gemini Screener Explanation")
+    st.subheader("Groq Screener Explanation")
 
     llm_screener_report = {
         "success": False,
         "llm_available": False,
         "plain_language_report": (
-            "Gemini Report Agent is not available. "
-            "Please check agents/llm_report_agent.py, google-genai installation, and GEMINI_API_KEY."
+            "Groq Report Agent is not available. "
+            "Please check agents/llm_report_agent.py, groq installation, and GROQ_API_KEY."
         ),
-        "summary": "Gemini Screener Report unavailable."
+        "summary": "Groq Screener Report unavailable."
     }
 
     llm_report_agent = make_llm_agent()
 
     if llm_report_agent is not None:
-        with st.spinner("Gemini Report Agent is explaining the screener result..."):
+        with st.spinner("Groq Report Agent is explaining the screener result..."):
             llm_screener_report = llm_report_agent.generate_screener_report(
                 user_question=screener_question,
                 screener_result=screener_result
             )
 
     if llm_screener_report.get("llm_available"):
-        st.success("Gemini screener explanation generated successfully.")
+        st.success("Groq screener explanation generated successfully.")
     else:
         st.warning(
-            "Gemini API was not available. The system used a fallback explanation "
+            "Groq API was not available. The system used a fallback explanation "
             "or skipped LLM output."
         )
 
@@ -815,7 +915,7 @@ if st.button("Run S&P-style Screener"):
         with st.expander("Show Failed Symbols"):
             st.json(screener_result.get("failed_symbols", []))
 
-    with st.expander("Show Gemini Screener Report JSON"):
+    with st.expander("Show Groq Screener Report JSON"):
         st.json(llm_screener_report)
 
     with st.expander("Show Full Screener Result JSON"):
@@ -827,47 +927,82 @@ if st.button("Run S&P-style Screener"):
 # -----------------------------
 st.divider()
 
-st.header("Gemini Financial Report / News Simplifier")
+st.header("Groq Financial Report / News Simplifier")
 
 st.info(
-    "Paste a financial report, earnings news, or market commentary. "
-    "The Gemini Report Agent will simplify it into key points, risks, and possible impact."
+    "This section only simplifies financial reports, earnings news, company announcements, "
+    "or market commentary. It does not answer direct buy/sell/clear-position/leverage questions. "
+    "For stock decision questions, please use the single-stock pipeline above."
+)
+
+st.caption(
+    "Example input: Apple reported stronger-than-expected quarterly revenue, "
+    "but management warned that China demand remained weak and services growth slowed."
 )
 
 financial_text = st.text_area(
-    "Paste financial report or news text",
+    "Paste financial report, earnings news, company announcement, or market commentary",
     height=180,
-    placeholder="Paste earnings report, news, or analyst commentary here..."
+    placeholder=(
+        "Paste actual report/news text here. "
+        "Example: Apple reported quarterly revenue growth but warned about weaker China demand..."
+    )
 )
 
 financial_question = st.text_input(
-    "Question for report simplification",
-    value="Please simplify this text and identify the main risks and positive signals."
+    "Question for report/news simplification",
+    value=(
+        "Please simplify this report/news text and identify the main positive signals, "
+        "risks, and possible market impact."
+    )
 )
 
-if st.button("Simplify Financial Text"):
-    llm_report_agent = make_llm_agent()
+if st.button("Simplify Financial Report / News"):
+    combined_text_for_check = f"{financial_text} {financial_question}"
 
-    if llm_report_agent is None:
+    if not financial_text.strip():
         st.warning(
-            "Gemini Report Agent is not available. Please check agents/llm_report_agent.py, "
-            "google-genai installation, and GEMINI_API_KEY."
+            "Please paste a financial report, earnings news, company announcement, "
+            "or market commentary before using this section."
         )
+
+    elif is_direct_trading_question(combined_text_for_check):
+        st.warning(
+            "This section is only for simplifying reports or news. "
+            "It does not answer direct buy/sell, clear-position, add-position, or leverage questions. "
+            "Please use the single-stock pipeline above for stock decision questions."
+        )
+
+        st.info(
+            "For example, instead of asking 'Should I buy AAPL now?', paste a news/report paragraph such as: "
+            "'Apple reported stronger iPhone sales, but management warned about weaker China demand.'"
+        )
+
     else:
-        with st.spinner("Gemini Report Agent is simplifying the text..."):
-            simplification_result = llm_report_agent.simplify_financial_text(
-                report_text=financial_text,
-                user_question=financial_question
-            )
+        llm_report_agent = make_llm_agent()
 
-        if simplification_result.get("llm_available"):
-            st.success("Financial text simplified successfully.")
-        else:
+        if llm_report_agent is None:
             st.warning(
-                "Gemini API was not available. Please check GEMINI_API_KEY and google-genai installation."
+                "Groq Report Agent is not available. Please check agents/llm_report_agent.py, "
+                "groq installation, and GROQ_API_KEY."
             )
 
-        st.markdown(simplification_result.get("plain_language_report", ""))
+        else:
+            with st.spinner("Groq Report Agent is simplifying the report/news text..."):
+                simplification_result = llm_report_agent.simplify_financial_text(
+                    report_text=financial_text,
+                    user_question=financial_question
+                )
 
-        with st.expander("Show Financial Text Simplification JSON"):
-            st.json(simplification_result)
+            if simplification_result.get("llm_available"):
+                st.success("Financial report/news text simplified successfully.")
+            else:
+                st.warning(
+                    "Groq API was not available. The system used a fallback explanation "
+                    "or skipped LLM output. Please check GROQ_API_KEY and groq installation."
+                )
+
+            st.markdown(simplification_result.get("plain_language_report", ""))
+
+            with st.expander("Show Financial Text Simplification JSON"):
+                st.json(simplification_result)
