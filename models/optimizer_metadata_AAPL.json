@@ -1,0 +1,31 @@
+{
+  "symbol": "AAPL",
+  "trained_at_utc": "2026-05-25 04:12:06",
+  "feature_columns": [
+    "return_1",
+    "return_5",
+    "return_20",
+    "ma_gap",
+    "volatility_20",
+    "volume_change",
+    "rsi_14",
+    "validation_confidence_score"
+  ],
+  "best_params": {
+    "n_estimators": 50,
+    "max_depth": null
+  },
+  "best_test_accuracy": 0.3333333333333333,
+  "baseline_accuracy": 0.2708333333333333,
+  "improvement_over_baseline": 0.0625,
+  "label_distribution": {
+    "BUY_CANDIDATE": 190,
+    "HOLD": 144,
+    "SELL_RISK": 143
+  },
+  "num_samples": 477,
+  "train_samples": 381,
+  "test_samples": 96,
+  "applied_to_main_model": false,
+  "model_path": "models\\optimized_signal_model_AAPL.pkl"
+}

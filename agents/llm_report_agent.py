@@ -2,10 +2,6 @@ import os
 import json
 from typing import Dict, Any, Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 try:
     from groq import Groq
 except Exception:
@@ -14,63 +10,68 @@ except Exception:
 
 class LLMReportAgent:
     """
-    Groq-powered Recommendation / Report Agent.
+    Groq-powered LLM Report Agent.
 
-    Role:
-    - Explain structured outputs from other agents in plain language.
-    - Answer user questions based on pipeline results.
-    - Summarise screener results.
-    - Simplify pasted financial/news/report text.
-
-    Safety:
-    - The LLM does not execute real trades.
-    - The LLM does not override the Signal Model or Risk Agent.
-    - The output is framed as paper decision support, not guaranteed financial advice.
+    It explains structured outputs from the multi-agent pipeline.
+    It does not create the trading decision itself.
     """
 
-    def __init__(self, model: Optional[str] = None):
+    SAFETY_WORDING_RULES = """
+Important wording rules:
+- Do not say "you should buy", "you should sell", "recommended to buy", or "recommended to sell".
+- Use safer decision-support wording:
+  - "not identified as a strong buy candidate at this stage"
+  - "shows a HOLD-style signal"
+  - "requires caution"
+  - "candidate for further research"
+  - "higher-risk watchlist stock"
+  - "not a strong entry signal based on the current agent outputs"
+- Do not provide personalized financial advice.
+- Do not tell the user to clear position, add position, reduce position, or use leverage.
+- Always explain that the output is for paper decision support and further research only.
+"""
+
+    FINANCIAL_SIMPLIFIER_RULES = """
+Financial report/news simplification rules:
+- You must only use the pasted report/news text provided by the user.
+- Do not search for news.
+- Do not invent company events, numbers, announcements, market reactions, or analyst opinions.
+- If the pasted text does not contain enough concrete report/news information, say:
+  "Insufficient pasted report/news text was provided. Please paste the actual report or news paragraph."
+- Do not answer direct buy/sell/position/leverage questions.
+- Do not provide personalized financial advice.
+- Use cautious wording such as "may", "could", "suggests", and "potential impact".
+"""
+
+    def __init__(self, model: Optional[str] = None, temperature: float = 0.2, max_tokens: int = 1000):
         self.api_key = os.getenv("GROQ_API_KEY")
-
-        self.model = model or os.getenv(
-            "GROQ_MODEL",
-            "llama-3.1-8b-instant"
-        )
-
+        self.model = model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self.client = None
 
         if Groq is not None and self.api_key:
-            self.client = Groq(api_key=self.api_key)
+            try:
+                self.client = Groq(api_key=self.api_key)
+            except Exception:
+                self.client = None
 
-    # --------------------------------------------------
-    # Utility helpers
-    # --------------------------------------------------
-    def _safe_json(self, data: Any, max_chars: int = 7000) -> str:
+    def _safe_json(self, data: Any, max_chars: int = 4500) -> str:
         try:
             text = json.dumps(data, indent=2, ensure_ascii=False, default=str)
         except Exception:
             text = str(data)
-
         if len(text) > max_chars:
             return text[:max_chars] + "\n... [truncated]"
         return text
 
-    def _call_llm(self, system_message: str, user_message: str) -> Dict[str, Any]:
-        """
-        Call Groq API. If the API key is missing or the call fails,
-        return a safe fallback instead of crashing Streamlit.
-        """
-
+    def _call_groq(self, prompt: str) -> Dict[str, Any]:
         if self.client is None:
             return {
                 "success": False,
                 "llm_available": False,
-                "provider": "groq",
-                "model": self.model,
-                "error": (
-                    "Groq client is not available. Please check GROQ_API_KEY "
-                    "and make sure the groq package is installed."
-                ),
-                "output_text": None
+                "llm_error": "Groq client is not available. Check GROQ_API_KEY, GROQ_MODEL, and groq installation.",
+                "text": ""
             }
 
         try:
@@ -79,79 +80,139 @@ class LLMReportAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": system_message
+                        "content": (
+                            "You are a cautious financial decision-support explanation assistant. "
+                            "You explain structured agent outputs in clear language. "
+                            "You do not provide personalized financial advice."
+                        )
                     },
-                    {
-                        "role": "user",
-                        "content": user_message
-                    }
+                    {"role": "user", "content": prompt}
                 ],
-                temperature=0.2,
-                max_tokens=1200
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
             )
-
-            output_text = response.choices[0].message.content
-
             return {
                 "success": True,
                 "llm_available": True,
-                "provider": "groq",
-                "model": self.model,
-                "output_text": output_text
+                "llm_error": "",
+                "text": response.choices[0].message.content
             }
-
         except Exception as e:
-            error_text = str(e)
-
-            if "429" in error_text or "rate limit" in error_text.lower() or "quota" in error_text.lower():
-                friendly_error = (
-                    "Groq API call failed because the current API quota or rate limit was reached. "
-                    "The API key may be valid, but the free-tier limit has been exceeded."
-                )
-            elif "api_key" in error_text.lower() or "invalid" in error_text.lower() or "unauthorized" in error_text.lower():
-                friendly_error = (
-                    "Groq API call failed because the API key may be missing or invalid. "
-                    "Check GROQ_API_KEY in the .env file."
-                )
-            else:
-                friendly_error = f"Groq API call failed: {error_text}"
-
             return {
                 "success": False,
                 "llm_available": False,
-                "provider": "groq",
-                "model": self.model,
-                "error": friendly_error,
-                "raw_error": error_text,
-                "output_text": None
+                "llm_error": str(e),
+                "text": ""
             }
 
-    def _base_system_prompt(self) -> str:
+    def _fallback_single_stock_report(
+        self,
+        validation_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        signal_result: Dict[str, Any],
+        risk_result: Dict[str, Any],
+        strategy_result: Optional[Dict[str, Any]] = None
+    ) -> str:
+        strategy_result = strategy_result or {}
+
+        symbol = (
+            strategy_result.get("symbol")
+            or risk_result.get("symbol")
+            or signal_result.get("symbol")
+            or analysis_result.get("symbol")
+            or "the stock"
+        )
+
+        analyst_signal = analysis_result.get("analyst_signal", "Unknown")
+        analyst_score = analysis_result.get("analyst_score", "Unknown")
+        model_signal = signal_result.get("model_signal") or signal_result.get("signal") or "Unknown"
+        final_signal = (
+            risk_result.get("final_signal")
+            or risk_result.get("risk_for_next_agent", {}).get("final_signal")
+            or model_signal
+        )
+        risk_level = (
+            risk_result.get("risk_level")
+            or risk_result.get("risk_for_next_agent", {}).get("risk_level")
+            or "Unknown"
+        )
+        strategy_action = strategy_result.get("strategy_action", "FURTHER_RESEARCH_ONLY")
+        strategy_level = strategy_result.get("strategy_level", "Conservative")
+        position_guidance = strategy_result.get(
+            "position_guidance",
+            "Use this result as research support only and wait for clearer evidence."
+        )
+        leverage_guidance = strategy_result.get("leverage_guidance", "Do not use leverage in this prototype.")
+
+        return f"""
+**Direct Answer:** {symbol} is not being presented as a direct buy or sell instruction. Based on the current agent outputs, the risk-controlled signal is **{final_signal}** and the strategy action is **{strategy_action}**.
+
+**Evidence from Agents:**
+- Validation confidence: {validation_result.get("confidence", "Unknown")}
+- Analyst signal: {analyst_signal}, analyst score: {analyst_score}
+- Signal model output: {model_signal}
+- Risk Agent final signal: {final_signal}
+- Risk level: {risk_level}
+- Strategist level: {strategy_level}
+
+**Strategy Guidance:** {position_guidance}
+
+**Leverage Guidance:** {leverage_guidance}
+
+**Risk Warning:** This is paper decision support only. The model may be wrong, and market conditions can change quickly.
+
+**Not Financial Advice Disclaimer:** This output is for paper decision support and further research only. It is not personalized financial advice.
+""".strip()
+
+    def _fallback_screener_report(self, screener_result: Dict[str, Any]) -> str:
+        top_buy = screener_result.get("top_buy_candidates", [])[:5]
+        top_risk = (
+            screener_result.get("highest_risk_candidates")
+            or screener_result.get("top_sell_risk")
+            or []
+        )[:5]
+
+        buy_lines = []
+        for item in top_buy:
+            buy_lines.append(
+                f"- {item.get('symbol', 'Unknown')}: buy_score={item.get('buy_score', 'N/A')}, "
+                f"risk_score={item.get('risk_score', 'N/A')}, signal={item.get('screen_signal', 'N/A')}"
+            )
+
+        risk_lines = []
+        for item in top_risk:
+            risk_lines.append(
+                f"- {item.get('symbol', 'Unknown')}: risk_score={item.get('risk_score', 'N/A')}, "
+                f"buy_score={item.get('buy_score', 'N/A')}, signal={item.get('screen_signal', 'N/A')}"
+            )
+
+        return f"""
+**Direct Answer:** The screener produced candidates for further research, not direct buy or sell recommendations.
+
+**Top Candidates for Further Research:**
+{chr(10).join(buy_lines) if buy_lines else "- No candidates available."}
+
+**Higher-Risk / Caution Candidates:**
+{chr(10).join(risk_lines) if risk_lines else "- No caution candidates available."}
+
+**Risk Warning:** Some candidates may have high RSI, weak momentum, or higher volatility. These results should be checked with further research.
+
+**Not Financial Advice Disclaimer:** This is a paper decision-support output only. It is not financial advice.
+""".strip()
+
+    def _fallback_financial_summary(self) -> str:
         return """
-You are a Groq-powered Recommendation / Report Agent inside a human-in-the-loop multi-agent trading decision support prototype.
+**Summary:** Groq was not available, so the system cannot generate a full LLM summary.
 
-Important safety rules:
-1. Do not claim to provide guaranteed financial advice.
-2. Do not tell the user to definitely buy, sell, clear a position, add leverage, or enter a real trade.
-3. Explain that outputs are for paper decision support and further research.
-4. Base your answer only on the provided structured agent outputs.
-5. Treat the Risk Agent as the final safety layer.
-6. Be clear, practical, and concise.
-7. If the signal is risky or confidence is low/medium, recommend caution.
-8. For leverage questions, be conservative. Do not recommend leverage under high risk, low confidence, medium confidence, or SELL_RISK.
-9. Use simple language suitable for a student demo.
+**Positive Signals:** Please review the pasted text for revenue growth, margin improvement, guidance, product progress, or management confidence.
 
-Output format:
-- Direct answer
-- Evidence from agents
-- Risk warning
-- Strategy suggestion
-- Not financial advice disclaimer
-"""
+**Negative Signals / Risks:** Please review the pasted text for cost pressure, weaker demand, regulatory concerns, debt risk, or uncertainty.
 
-    # --------------------------------------------------
-    # Single-stock report
-    # --------------------------------------------------
+**Possible Market Impact:** The impact depends on how investors interpret the balance between positive signals and risks.
+
+**Cautious Conclusion:** This section is for report/news simplification only. It does not provide direct buy/sell advice.
+""".strip()
+
     def generate_single_stock_report(
         self,
         user_question: str,
@@ -160,331 +221,216 @@ Output format:
         training_result: Dict[str, Any],
         signal_result: Dict[str, Any],
         risk_result: Dict[str, Any],
+        strategy_result: Optional[Dict[str, Any]] = None,
         reward_record_result: Optional[Dict[str, Any]] = None,
         auto_reward_update_result: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Generate natural-language answer for one stock based on full pipeline outputs.
-        """
+        prompt = f"""
+You are explaining the result of a human-in-the-loop multi-agent stock decision-support system.
 
-        symbol = (
-            risk_result.get("risk_for_next_agent", {}).get("symbol")
-            or risk_result.get("symbol")
-            or signal_result.get("signal_for_next_agent", {}).get("symbol")
-            or analysis_result.get("symbol")
-            or validation_result.get("validation_for_next_agent", {}).get("symbol")
-            or "UNKNOWN"
-        )
+{self.SAFETY_WORDING_RULES}
 
-        structured_context = {
-            "symbol": symbol,
-            "validation_result": validation_result,
-            "analysis_result": analysis_result,
-            "training_result": training_result,
-            "signal_result": signal_result,
-            "risk_result": risk_result,
-            "reward_record_result": reward_record_result or {},
-            "auto_reward_update_result": auto_reward_update_result or {}
-        }
-
-        system_message = self._base_system_prompt()
-
-        user_message = f"""
 User question:
 {user_question}
 
-Structured multi-agent pipeline output:
-{self._safe_json(structured_context)}
+Validation Agent output:
+{self._safe_json(validation_result)}
 
-Please answer the user's question using only this information.
+Analyst Agent output:
+{self._safe_json(analysis_result)}
+
+Training Agent output:
+{self._safe_json(training_result)}
+
+Signal Model output:
+{self._safe_json(signal_result)}
+
+Risk Agent output:
+{self._safe_json(risk_result)}
+
+Strategist Agent output:
+{self._safe_json(strategy_result or {})}
+
+Reward Agent output:
+{self._safe_json(reward_record_result or {})}
+
+Auto delayed reward update output:
+{self._safe_json(auto_reward_update_result or {})}
+
+Please produce a short, clear answer with this structure:
+
+**Direct Answer:**
+Use safe wording. Do not say "recommended to buy" or "recommended to sell".
+
+**Evidence from Agents:**
+Explain validation, analyst signal, model signal, risk signal, and strategist output.
+
+**Strategy Guidance:**
+Use the Strategist Agent output. Do not invent a new strategy.
+
+**Risk Warning:**
+Explain risk level and uncertainty.
+
+**Not Financial Advice Disclaimer:**
+State that this is paper decision support and not financial advice.
 """
+        response = self._call_groq(prompt)
 
-        llm_result = self._call_llm(system_message, user_message)
-
-        if llm_result.get("success"):
-            report_text = llm_result["output_text"]
-            source = "groq_llm"
+        if response["success"]:
+            report = response["text"]
+            llm_available = True
         else:
-            report_text = self._fallback_single_stock_report(
-                user_question=user_question,
+            report = self._fallback_single_stock_report(
                 validation_result=validation_result,
                 analysis_result=analysis_result,
                 signal_result=signal_result,
-                risk_result=risk_result
+                risk_result=risk_result,
+                strategy_result=strategy_result
             )
-            source = "fallback_rule"
+            llm_available = False
+
+        symbol = (
+            (strategy_result or {}).get("symbol")
+            or risk_result.get("symbol")
+            or signal_result.get("symbol")
+            or analysis_result.get("symbol")
+            or "the selected stock"
+        )
 
         return {
             "success": True,
-            "agent_goal": "Explain the single-stock multi-agent decision in natural language.",
-            "report_type": "single_stock_report",
-            "symbol": symbol,
-            "source": source,
+            "agent_goal": "Explain single-stock pipeline output in plain language.",
             "provider": "groq",
             "model": self.model,
-            "llm_available": llm_result.get("llm_available", False),
-            "llm_error": llm_result.get("error"),
-            "plain_language_report": report_text,
+            "llm_available": llm_available,
+            "llm_error": response.get("llm_error", ""),
+            "plain_language_report": report,
             "summary": f"Groq Report Agent generated a single-stock explanation for {symbol}."
         }
 
-    # --------------------------------------------------
-    # Screener report
-    # --------------------------------------------------
     def generate_screener_report(
         self,
         user_question: str,
         screener_result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Generate natural-language explanation for S&P-style screener result.
-        """
+        prompt = f"""
+You are explaining the result of a watchlist-based S&P-style stock screener.
 
-        compact_context = {
-            "summary": screener_result.get("summary"),
-            "universe_size": screener_result.get("universe_size"),
-            "scanned_count": screener_result.get("scanned_count"),
-            "failed_count": screener_result.get("failed_count"),
-            "top_buy_candidates": screener_result.get("top_buy_candidates", [])[:10],
-            "highest_risk_candidates": screener_result.get(
-                "highest_risk_candidates",
-                screener_result.get("top_sell_risk", [])
-            )[:10]
-        }
+{self.SAFETY_WORDING_RULES}
 
-        system_message = self._base_system_prompt()
-
-        user_message = f"""
 User question:
 {user_question}
 
-S&P-style Screener Agent output:
-{self._safe_json(compact_context)}
+Screener Agent output:
+{self._safe_json(screener_result, max_chars=5000)}
 
-Please explain:
-1. Which stocks look strongest for further research.
-2. Which stocks need caution.
-3. Why overbought stocks should not be treated as direct buy recommendations.
-4. A short risk-aware conclusion.
+Please produce a clear explanation with this structure:
+
+**Direct Answer:**
+Say "top candidates for further research", not "stocks to buy".
+
+**Top Candidates for Further Research:**
+Summarize the strongest candidates using buy_score, risk_score, signal, and reason.
+
+**Higher-Risk / Caution Candidates:**
+Summarize the caution candidates.
+
+**Evidence from Agents:**
+Explain the metrics used, such as momentum, RSI, volatility, moving average gap, and risk score.
+
+**Risk Warning:**
+Mention overbought RSI, negative momentum, volatility, and watchlist limitation.
+
+**Not Financial Advice Disclaimer:**
+State that this is paper decision support and not financial advice.
 """
+        response = self._call_groq(prompt)
 
-        llm_result = self._call_llm(system_message, user_message)
-
-        if llm_result.get("success"):
-            report_text = llm_result["output_text"]
-            source = "groq_llm"
+        if response["success"]:
+            report = response["text"]
+            llm_available = True
         else:
-            report_text = self._fallback_screener_report(screener_result)
-            source = "fallback_rule"
+            report = self._fallback_screener_report(screener_result)
+            llm_available = False
 
         return {
             "success": True,
-            "agent_goal": "Explain the S&P-style screener result in natural language.",
-            "report_type": "screener_report",
-            "source": source,
+            "agent_goal": "Explain screener output in plain language.",
             "provider": "groq",
             "model": self.model,
-            "llm_available": llm_result.get("llm_available", False),
-            "llm_error": llm_result.get("error"),
-            "plain_language_report": report_text,
-            "summary": "Groq Report Agent generated a screener explanation."
+            "llm_available": llm_available,
+            "llm_error": response.get("llm_error", ""),
+            "plain_language_report": report,
+            "summary": "Groq screener explanation generated successfully."
         }
 
-    # --------------------------------------------------
-    # Financial report / news simplifier
-    # --------------------------------------------------
-    def simplify_financial_text(
-        self,
-        report_text: str,
-        user_question: str = "Please simplify this financial report or news text."
-    ) -> Dict[str, Any]:
-        """
-        Simplify pasted financial report/news/analysis text.
-        """
-
-        if not report_text or not report_text.strip():
+    def simplify_financial_text(self, report_text: str, user_question: str) -> Dict[str, Any]:
+        clean_text = report_text.strip()
+        if len(clean_text) < 120 or len(clean_text.split()) < 20:
+            report = (
+                "**Insufficient pasted report/news text was provided.** "
+                "Please paste the actual report or news paragraph. "
+                "This section does not search news automatically and should not generate content from a ticker-only query."
+            )
             return {
-                "success": False,
-                "agent_goal": "Simplify financial/news/report text in plain language.",
+                "success": True,
+                "agent_goal": "Simplify pasted financial report/news text.",
                 "report_type": "financial_text_simplification",
-                "source": "none",
+                "source": "input_validation",
                 "provider": "groq",
+                "model": self.model,
                 "llm_available": False,
-                "plain_language_report": "No report text was provided.",
-                "summary": "No report text was provided."
+                "llm_error": "Input text too short for reliable simplification.",
+                "plain_language_report": report,
+                "summary": "Financial Simplifier rejected short input to avoid hallucination."
             }
 
-        system_message = """
-You are a Groq-powered Report Simplification Agent for an educational trading decision support prototype.
+        prompt = f"""
+You are a financial report/news simplification assistant.
 
-Your task:
-- Simplify complex financial, news, or company report text.
-- Extract key positive points, negative points, risks, and possible market impact.
-- Do not provide guaranteed investment advice.
-- Do not recommend real trading or leverage.
-- Use clear student-friendly language.
+{self.FINANCIAL_SIMPLIFIER_RULES}
 
-Output format:
-- Simple summary
-- Positive signals
-- Negative signals / risks
-- Possible impact
-- Cautious conclusion
-"""
+User pasted report/news text:
+{clean_text}
 
-        user_message = f"""
 User question:
 {user_question}
 
-Report/news text:
-{report_text[:8000]}
+Please produce the answer with this structure:
+
+**Summary:**
+Summarize only the pasted text.
+
+**Positive Signals:**
+List positive signals only if they are supported by the pasted text.
+
+**Negative Signals / Risks:**
+List risks only if they are supported by the pasted text.
+
+**Possible Market Impact:**
+Describe possible market impact cautiously, using only the pasted text.
+
+**Cautious Conclusion:**
+Do not give buy/sell/position/leverage advice. State that this is only report/news simplification.
 """
+        response = self._call_groq(prompt)
 
-        llm_result = self._call_llm(system_message, user_message)
-
-        if llm_result.get("success"):
-            report = llm_result["output_text"]
-            source = "groq_llm"
+        if response["success"]:
+            report = response["text"]
+            llm_available = True
         else:
-            report = (
-                "Groq is not available, so the system used a fallback explanation. "
-                "Please check GROQ_API_KEY and groq package installation."
-            )
-            source = "fallback_rule"
+            report = self._fallback_financial_summary()
+            llm_available = False
 
         return {
             "success": True,
-            "agent_goal": "Simplify financial/news/report text in plain language.",
+            "agent_goal": "Simplify pasted financial report/news text in plain language.",
             "report_type": "financial_text_simplification",
-            "source": source,
+            "source": "pasted_user_text_only",
             "provider": "groq",
             "model": self.model,
-            "llm_available": llm_result.get("llm_available", False),
-            "llm_error": llm_result.get("error"),
+            "llm_available": llm_available,
+            "llm_error": response.get("llm_error", ""),
             "plain_language_report": report,
-            "summary": "Groq Report Agent simplified the provided financial text."
+            "summary": "Financial Report/News Simplifier processed pasted text only."
         }
-
-    # --------------------------------------------------
-    # Fallback reports
-    # --------------------------------------------------
-    def _fallback_single_stock_report(
-        self,
-        user_question: str,
-        validation_result: Dict[str, Any],
-        analysis_result: Dict[str, Any],
-        signal_result: Dict[str, Any],
-        risk_result: Dict[str, Any]
-    ) -> str:
-        symbol = (
-            risk_result.get("risk_for_next_agent", {}).get("symbol")
-            or risk_result.get("symbol")
-            or signal_result.get("signal_for_next_agent", {}).get("symbol")
-            or analysis_result.get("symbol")
-            or "this stock"
-        )
-
-        validation_confidence = validation_result.get("confidence", "Unknown")
-        analyst_signal = analysis_result.get("analyst_signal", "Unknown")
-        model_signal = signal_result.get("model_signal", "Unknown")
-        model_confidence = signal_result.get("confidence_level", "Unknown")
-        final_signal = risk_result.get("final_signal", "Unknown")
-        risk_level = risk_result.get("risk_level", "Unknown")
-        risk_action = risk_result.get("risk_action", "Unknown")
-
-        if final_signal == "BUY_CANDIDATE":
-            direct_answer = (
-                f"{symbol} is shown as a buy candidate for further research, "
-                "but this should not be treated as a guaranteed buy decision."
-            )
-            strategy = (
-                "A cautious paper strategy is to monitor confirmation and avoid over-sizing the position."
-            )
-
-        elif final_signal == "SELL_RISK":
-            direct_answer = (
-                f"{symbol} is currently classified as SELL_RISK. "
-                "The system is cautious about this stock."
-            )
-            strategy = (
-                "A cautious paper strategy is to avoid new entry, reduce exposure, "
-                "or monitor until risk improves."
-            )
-
-        elif final_signal == "HOLD":
-            direct_answer = (
-                f"{symbol} is currently closer to HOLD. "
-                "The system does not detect a strong directional opportunity."
-            )
-            strategy = "A cautious paper strategy is to hold or wait for clearer confirmation."
-
-        elif final_signal == "BLOCKED":
-            direct_answer = (
-                f"The system blocked analysis or action for {symbol}, usually due to low data confidence or high risk."
-            )
-            strategy = "The safest paper strategy is to take no action."
-
-        else:
-            direct_answer = f"The system generated an uncertain signal for {symbol}."
-            strategy = "The safest paper strategy is to monitor and avoid aggressive action."
-
-        return f"""
-### Direct answer
-{direct_answer}
-
-### Evidence from agents
-- Validation confidence: {validation_confidence}
-- Analyst signal: {analyst_signal}
-- Model signal: {model_signal}
-- Model confidence: {model_confidence}
-- Risk Agent final signal: {final_signal}
-- Risk level: {risk_level}
-- Risk action: {risk_action}
-
-### Risk warning
-This is a paper decision support result. The system may be wrong, and market conditions can change quickly.
-
-### Strategy suggestion
-{strategy}
-
-### Disclaimer
-This is not financial advice and does not execute real trades.
-"""
-
-    def _fallback_screener_report(self, screener_result: Dict[str, Any]) -> str:
-        top_buy = screener_result.get("top_buy_candidates", [])[:5]
-        top_risk = screener_result.get(
-            "highest_risk_candidates",
-            screener_result.get("top_sell_risk", [])
-        )[:5]
-
-        buy_lines = []
-        for row in top_buy:
-            buy_lines.append(
-                f"- {row.get('symbol')}: buy_score={row.get('buy_score')}, "
-                f"signal={row.get('screen_signal')}, reason={row.get('reason')}"
-            )
-
-        risk_lines = []
-        for row in top_risk:
-            risk_lines.append(
-                f"- {row.get('symbol')}: risk_score={row.get('risk_score')}, "
-                f"signal={row.get('screen_signal')}, reason={row.get('reason')}"
-            )
-
-        return f"""
-### Screener summary
-The Screener Agent scanned an S&P-style stock universe and ranked stocks by technical features.
-
-### Top buy candidates for further research
-{chr(10).join(buy_lines) if buy_lines else "No buy candidates available."}
-
-### Highest risk / caution candidates
-{chr(10).join(risk_lines) if risk_lines else "No caution candidates available."}
-
-### Risk warning
-Stocks marked as BUY_WATCHLIST_OVERBOUGHT may have strong momentum but higher entry risk because RSI is high.
-
-### Disclaimer
-This is a prototype screener for paper decision support, not financial advice.
-"""
