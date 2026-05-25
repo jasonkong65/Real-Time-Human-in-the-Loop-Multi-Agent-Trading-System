@@ -1,6 +1,6 @@
 {
   "symbol": "AAPL",
-  "trained_at_utc": "2026-05-25 04:12:06",
+  "trained_at_utc": "2026-05-25 15:48:39",
   "feature_columns": [
     "return_1",
     "return_5",

@@ -1,3 +1,4 @@
+import os
 import traceback
 import pandas as pd
 import streamlit as st
@@ -20,7 +21,7 @@ try:
 except Exception:
     LLMReportAgent = None
 
-load_dotenv()
+load_dotenv(override=True)
 
 st.set_page_config(
     page_title="Human-in-the-Loop Multi-Agent Trading System",
@@ -63,6 +64,104 @@ def get_nested(data, keys, default=None):
         if current is None:
             return default
     return current
+
+
+def safe_text(value, default="N/A"):
+    """Convert values to readable UI text."""
+    if value is None:
+        return default
+    value = str(value)
+    return value if value.strip() else default
+
+
+def numeric_fmt(value, digits=3, default="N/A"):
+    try:
+        if value is None:
+            return default
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return safe_text(value, default)
+
+
+def get_signal_display(signal_result):
+    return (
+        signal_result.get("display_signal")
+        or signal_result.get("enhanced_signal")
+        or get_nested(signal_result, ["signal_for_next_agent", "display_signal"])
+        or get_nested(signal_result, ["signal_for_next_agent", "enhanced_signal"])
+        or signal_result.get("model_signal")
+        or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
+    )
+
+
+def get_risk_interpretation(risk_result):
+    return (
+        risk_result.get("risk_interpretation")
+        or risk_result.get("risk_theme")
+        or risk_result.get("risk_note")
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_interpretation"])
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_theme"])
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_note"])
+        or "No additional risk interpretation was provided."
+    )
+
+
+def short_ui_label(value):
+    """Short labels for summary cards; full raw labels are shown below."""
+    mapping = {
+        "POSITIVE_BUT_ENTRY_RISK": "Positive + Entry Risk",
+        "WATCHLIST_BULLISH_ENTRY_RISK": "Bullish Watchlist",
+        "BUY_WATCHLIST_OVERBOUGHT": "Buy Watchlist / High Entry Risk",
+        "WAIT_FOR_PULLBACK_OR_CONFIRMATION": "Wait for Pullback / Confirmation",
+        "MONITOR_AND_RESEARCH": "Monitor / Research",
+        "RISK_REDUCTION_REVIEW": "Review Risk Exposure",
+        "NO_ACTION_DATA_OR_RISK_BLOCK": "No Action / Risk Block",
+        "BUY_CANDIDATE": "Buy Candidate",
+        "SELL_RISK": "Sell Risk",
+        "HOLD": "Hold",
+        "NEUTRAL": "Neutral",
+        "HIGH": "High",
+        "MEDIUM": "Medium",
+        "LOW": "Low",
+        "CRITICAL": "Critical",
+        "CAUTIOUS": "Cautious",
+        "CONSERVATIVE": "Conservative",
+        "DEFENSIVE": "Defensive",
+    }
+    raw = safe_text(value)
+    return mapping.get(raw.upper(), raw.replace("_", " ").title())
+
+
+def card_tone(value):
+    v = safe_text(value).lower()
+    if any(x in v for x in ["buy", "positive", "bullish", "high"]):
+        return ("#eaf7ee", "#116329", "#b7ebc6")
+    if any(x in v for x in ["risk", "wait", "caution", "medium", "pullback", "sell"]):
+        return ("#fff7e6", "#8a5a00", "#ffe0a3")
+    if any(x in v for x in ["block", "critical", "defensive"]):
+        return ("#fff0f0", "#a30d11", "#ffc2c7")
+    return ("#f7f9fc", "#1f2937", "#d9e2ec")
+
+
+def render_readable_card(title, value, subtitle=None):
+    """A wrap-friendly replacement for st.metric, avoiding POSITIVE_B... truncation."""
+    bg, fg, border = card_tone(value)
+    value = short_ui_label(value)
+    subtitle = safe_text(subtitle, "")
+    subtitle_block = f"<div class='card-subtitle'>{subtitle}</div>" if subtitle else ""
+    st.markdown(
+        f"""
+        <div style="background:{bg}; border:1px solid {border}; border-radius:14px; padding:14px 16px; min-height:108px; margin-bottom:10px;">
+            <div style="font-size:0.82rem; color:#5b677a; margin-bottom:6px;">{title}</div>
+            <div style="font-size:1.22rem; line-height:1.25; font-weight:650; color:{fg}; white-space:normal; overflow-wrap:anywhere; word-break:break-word;">{value}</div>
+            {subtitle_block}
+        </div>
+        <style>
+        .card-subtitle {{font-size:0.80rem; color:#596579; margin-top:6px; line-height:1.25; overflow-wrap:anywhere;}}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def build_fallback_signal_result(symbol, analysis_result):
@@ -142,46 +241,92 @@ def build_fallback_risk_result(symbol, signal_result):
     }
 
 
+def get_secret_value(name, default=""):
+    """Read a value from Streamlit secrets first, then environment variables."""
+    try:
+        if hasattr(st, "secrets") and name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, default) or default
+
+
 def make_llm_agent():
     if LLMReportAgent is None:
+        st.session_state["llm_agent_init_error"] = "agents.llm_report_agent could not be imported."
         return None
+
     try:
-        return LLMReportAgent()
-    except Exception:
+        load_dotenv(override=True)
+        groq_key = (
+            get_secret_value("GROQ_API_KEY")
+            or get_secret_value("GROQ_API")
+            or get_secret_value("GROQ_KEY")
+            or ""
+        )
+        groq_model = get_secret_value("GROQ_MODEL", "llama-3.1-8b-instant")
+        return LLMReportAgent(
+            groq_api_key=groq_key,
+            model=groq_model,
+            timeout=30
+        )
+    except Exception as e:
+        st.session_state["llm_agent_init_error"] = str(e)
         return None
 
 
 def is_too_short_for_financial_simplifier(text: str) -> bool:
+    """
+    Less strict than the previous version.
+    Allow one concrete report/news sentence, but reject ticker-only or very short inputs.
+    """
     if not text:
         return True
-    cleaned = text.strip()
+    cleaned = " ".join(text.strip().split())
     word_count = len(cleaned.split())
-    return len(cleaned) < 120 or word_count < 20
+    return len(cleaned) < 45 or word_count < 8
+
+
+def has_concrete_financial_context(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    financial_keywords = [
+        "revenue", "sales", "profit", "earnings", "eps", "margin", "guidance",
+        "forecast", "quarter", "annual", "cash flow", "debt", "cost", "expense",
+        "spending", "capex", "demand", "growth", "decline", "increase", "decrease",
+        "stronger", "weaker", "management", "reported", "announced", "warned",
+        "company", "customers", "cloud", "azure", "ai", "regulatory", "competition",
+        "market", "outlook", "operating"
+    ]
+    return any(keyword in lowered for keyword in financial_keywords)
 
 
 def is_search_like_financial_query(text: str) -> bool:
+    """
+    Reject only clear search-like inputs such as 'MSFT news' or 'input: AAPL earnings'.
+    Do not reject a real sentence just because it contains the word 'news'.
+    """
     if not text:
         return False
 
-    lowered = text.lower().strip()
-    search_like_keywords = [
-        "news", "latest news", "report", "earnings", "financial report",
-        "stock news", "market news", "input:", "find news", "search news",
-        "查新闻", "新聞", "新闻", "财报", "財報", "最新消息"
-    ]
-
-    if len(lowered.split()) <= 6 and any(keyword in lowered for keyword in search_like_keywords):
-        return True
-
+    cleaned = " ".join(text.strip().split())
+    lowered = cleaned.lower()
     tokens = lowered.replace(":", " ").replace(",", " ").split()
-    if len(tokens) <= 4:
+
+    if len(tokens) <= 5:
         has_news_word = any(
             token in ["news", "report", "earnings", "announcement", "update"]
             for token in tokens
         )
         has_ticker_like_word = any(token.isalpha() and 1 <= len(token) <= 5 for token in tokens)
-        if has_news_word and has_ticker_like_word:
+        has_reporting_verb = any(token in ["reported", "announced", "warned", "said"] for token in tokens)
+        if has_news_word and has_ticker_like_word and not has_reporting_verb:
             return True
+
+    search_phrases = ["find news", "search news", "latest news", "查新闻", "最新消息"]
+    if len(tokens) <= 8 and any(phrase in lowered for phrase in search_phrases):
+        return True
 
     return False
 
@@ -214,7 +359,11 @@ user_question = st.text_input(
     value="Should I buy this stock now?"
 )
 
-force_retrain = st.checkbox("Force retrain signal model", value=False)
+force_retrain = st.checkbox(
+    "Force retrain signal model",
+    value=False,
+    help="For normal demo/use, keep this unchecked so the app can reuse the existing or optimized model."
+)
 run_pipeline = st.button("Run Agent Pipeline")
 
 
@@ -408,55 +557,100 @@ if run_pipeline:
             signal_result.get("model_signal")
             or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
         )
+        model_display_signal = get_signal_display(signal_result)
         risk_level = (
             risk_result.get("risk_level")
             or get_nested(risk_result, ["risk_for_next_agent", "risk_level"], "Unknown")
         )
 
-        summary_cols = st.columns(8)
-        with summary_cols[0]:
-            st.metric("Symbol", clean_symbol)
-        with summary_cols[1]:
-            st.metric("Validation", validation_result.get("confidence", "Unknown"))
-        with summary_cols[2]:
-            st.metric("Analyst", analysis_result.get("analyst_signal", "Unknown"))
-        with summary_cols[3]:
-            st.metric("Model", model_signal)
-        with summary_cols[4]:
-            st.metric("Final Signal", final_signal)
-        with summary_cols[5]:
-            st.metric("Risk", risk_level)
-        with summary_cols[6]:
-            st.metric("Strategy", strategy_result.get("strategy_action", "Unknown"))
-        with summary_cols[7]:
-            st.metric("Strategy Level", strategy_result.get("strategy_level", "Unknown"))
+        analyst_raw_signal = analysis_result.get("analyst_signal", "Unknown")
+        analyst_display_signal = analysis_result.get("display_signal") or analyst_raw_signal
+        analyst_score = analysis_result.get("analyst_score", "N/A")
+        strategy_action = strategy_result.get("strategy_action", "Unknown")
+        strategy_level = strategy_result.get("strategy_level", "Unknown")
+        risk_interpretation = get_risk_interpretation(risk_result)
+        position_guidance = strategy_result.get("position_guidance", "No position guidance provided.")
+        leverage_guidance = strategy_result.get("leverage_guidance", "No leverage guidance provided.")
 
-        st.write(f"**Validation Decision:** {validation_result.get('agent_decision', 'N/A')}")
-        st.write(f"**Analyst Decision:** {analysis_result.get('agent_decision', 'N/A')}")
-        st.write(f"**Signal Model Decision:** {signal_result.get('agent_decision', 'N/A')}")
-        st.write(f"**Risk Decision:** {risk_result.get('agent_decision', 'N/A')}")
-        st.write(f"**Strategist Agent:** {strategy_result.get('summary', 'N/A')}")
-        st.write(f"**Reward Agent:** {reward_record_result.get('summary', 'N/A')}")
-        st.write(f"**Groq Report Agent:** {llm_single_stock_report.get('summary', 'N/A')}")
+        st.caption("Readable summary cards avoid Streamlit metric truncation. Full raw labels are kept in the detail table below.")
 
-        if validation_result.get("summary"):
-            st.success(validation_result.get("summary"))
-        if analysis_result.get("summary"):
-            st.success(analysis_result.get("summary"))
-        if signal_result.get("summary"):
-            st.success(signal_result.get("summary"))
-        if risk_result.get("summary"):
-            st.success(risk_result.get("summary"))
-        if strategy_result.get("summary"):
-            if strategy_result.get("success"):
-                st.success(strategy_result.get("summary"))
-            else:
-                st.warning(strategy_result.get("summary"))
-        if reward_record_result.get("summary"):
-            if reward_record_result.get("success"):
-                st.success(reward_record_result.get("summary"))
-            else:
-                st.warning(reward_record_result.get("summary"))
+        row1 = st.columns(4)
+        with row1[0]:
+            render_readable_card("Symbol", clean_symbol)
+        with row1[1]:
+            render_readable_card("Validation", validation_result.get("confidence", "Unknown"))
+        with row1[2]:
+            render_readable_card(
+                "Analyst Signal",
+                analyst_display_signal,
+                subtitle=f"Raw: {analyst_raw_signal}; score: {numeric_fmt(analyst_score)}"
+            )
+        with row1[3]:
+            render_readable_card(
+                "Model Signal",
+                model_signal,
+                subtitle=f"Display: {short_ui_label(model_display_signal)}"
+            )
+
+        row2 = st.columns(4)
+        with row2[0]:
+            render_readable_card("Final Signal", final_signal)
+        with row2[1]:
+            render_readable_card("Risk Level", risk_level, subtitle=risk_interpretation)
+        with row2[2]:
+            render_readable_card("Strategy", strategy_action)
+        with row2[3]:
+            render_readable_card("Strategy Level", strategy_level)
+
+        st.subheader("Risk-aware Strategy Guidance")
+        guidance_cols = st.columns(3)
+        with guidance_cols[0]:
+            st.info(f"**Position guidance**\n\n{position_guidance}")
+        with guidance_cols[1]:
+            st.warning(f"**Leverage guidance**\n\n{leverage_guidance}")
+        with guidance_cols[2]:
+            st.info(f"**Risk interpretation**\n\n{risk_interpretation}")
+
+        st.subheader("Raw Agent Labels")
+        raw_summary_df = pd.DataFrame([
+            {"Field": "Analyst raw signal", "Value": analyst_raw_signal},
+            {"Field": "Analyst display signal", "Value": analyst_display_signal},
+            {"Field": "Model raw signal", "Value": model_signal},
+            {"Field": "Model display signal", "Value": model_display_signal},
+            {"Field": "Final risk-controlled signal", "Value": final_signal},
+            {"Field": "Risk level", "Value": risk_level},
+            {"Field": "Strategy action", "Value": strategy_action},
+            {"Field": "Strategy level", "Value": strategy_level},
+        ])
+        st.dataframe(raw_summary_df, use_container_width=True, hide_index=True)
+
+        with st.expander("Show agent decisions and status messages", expanded=False):
+            st.write(f"**Validation Decision:** {validation_result.get('agent_decision', 'N/A')}")
+            st.write(f"**Analyst Decision:** {analysis_result.get('agent_decision', 'N/A')}")
+            st.write(f"**Signal Model Decision:** {signal_result.get('agent_decision', 'N/A')}")
+            st.write(f"**Risk Decision:** {risk_result.get('agent_decision', 'N/A')}")
+            st.write(f"**Strategist Agent:** {strategy_result.get('summary', 'N/A')}")
+            st.write(f"**Reward Agent:** {reward_record_result.get('summary', 'N/A')}")
+            st.write(f"**Groq Report Agent:** {llm_single_stock_report.get('summary', 'N/A')}")
+
+            if validation_result.get("summary"):
+                st.success(validation_result.get("summary"))
+            if analysis_result.get("summary"):
+                st.success(analysis_result.get("summary"))
+            if signal_result.get("summary"):
+                st.success(signal_result.get("summary"))
+            if risk_result.get("summary"):
+                st.success(risk_result.get("summary"))
+            if strategy_result.get("summary"):
+                if strategy_result.get("success"):
+                    st.success(strategy_result.get("summary"))
+                else:
+                    st.warning(strategy_result.get("summary"))
+            if reward_record_result.get("summary"):
+                if reward_record_result.get("success"):
+                    st.success(reward_record_result.get("summary"))
+                else:
+                    st.warning(reward_record_result.get("summary"))
 
         # -----------------------------
         # Detailed outputs
@@ -502,8 +696,15 @@ if run_pipeline:
         st.header("10. Groq Recommendation / Report Agent Output")
         if llm_single_stock_report.get("llm_available"):
             st.success("Groq explanation generated successfully.")
+        elif llm_single_stock_report.get("success"):
+            st.warning("Local fallback explanation was used. Groq did not return a live response.")
+            if llm_single_stock_report.get("llm_error"):
+                with st.expander("Show Groq API error / debug info"):
+                    st.code(llm_single_stock_report.get("llm_error"))
+                    if llm_single_stock_report.get("llm_debug"):
+                        st.json(llm_single_stock_report.get("llm_debug"))
         else:
-            st.warning("Groq API was not available. The system used a fallback explanation or skipped LLM output.")
+            st.error("Report Agent failed to generate an explanation.")
         st.markdown(llm_single_stock_report.get("plain_language_report", ""))
 
         with st.expander("Show Groq Report Agent JSON"):
@@ -835,8 +1036,15 @@ if st.button("Run S&P-style Screener"):
                 )
         if llm_screener_report.get("llm_available"):
             st.success("Groq screener explanation generated successfully.")
+        elif llm_screener_report.get("success"):
+            st.warning("Local fallback screener explanation was used. Groq did not return a live response.")
+            if llm_screener_report.get("llm_error"):
+                with st.expander("Show Groq API error / debug info"):
+                    st.code(llm_screener_report.get("llm_error"))
+                    if llm_screener_report.get("llm_debug"):
+                        st.json(llm_screener_report.get("llm_debug"))
         else:
-            st.warning("Groq API was not available. The system used a fallback explanation or skipped LLM output.")
+            st.error("Screener Report Agent failed to generate an explanation.")
         st.markdown(llm_screener_report.get("plain_language_report", ""))
         with st.expander("Show Full Screener Result JSON"):
             st.json(screener_result)
@@ -845,69 +1053,193 @@ if st.button("Run S&P-style Screener"):
 
 
 # -----------------------------
-# Financial Report / News Simplifier
+# Verified Financial News / Report Summarizer
 # -----------------------------
 st.divider()
-st.header("Groq Financial Report / News Simplifier")
+st.header("Verified Financial News / Report Summarizer")
 st.info(
-    "This section only simplifies pasted financial reports, earnings news, company announcements, or market commentary. "
-    "It does not search news automatically. For stock decision questions, please use the single-stock pipeline above."
+    "This section can simplify pasted financial reports, earnings news, company announcements, or market commentary. "
+    "If the input looks like a ticker/news/report query, the Report Agent can also try to fetch source-grounded "
+    "company news from Finnhub and a lightweight financial snapshot from Alpha Vantage when API keys are configured. "
+    "It does not search the open web and does not provide trading advice."
 )
 st.caption(
-    "Use this section by pasting actual report/news text, not a short query. Good example: "
+    "Examples: 'MSFT news', 'Microsoft financial report', or a pasted sentence such as "
     "'Microsoft reported stronger cloud revenue, but management warned that AI infrastructure spending may pressure margins.' "
-    "Bad example: 'MSFT news'."
+    "The system should use verified API data or pasted text only, and fallback output should clearly state its source limits."
 )
 
-financial_text = st.text_area(
-    "Paste actual financial report, earnings news, company announcement, or market commentary",
-    height=180,
-    placeholder=(
-        "Paste actual report/news text here. Example: Microsoft reported stronger Azure revenue in the latest quarter, "
-        "but management warned that higher AI infrastructure spending may pressure margins..."
+financial_col_1, financial_col_2 = st.columns([2, 1])
+
+with financial_col_1:
+    financial_text = st.text_area(
+        "Paste financial text or enter a ticker/news/report query",
+        height=180,
+        placeholder=(
+            "Examples:\n"
+            "MSFT news\n"
+            "Microsoft financial report\n"
+            "Microsoft reported stronger Azure revenue in the latest quarter, but management warned that higher AI infrastructure spending may pressure margins."
+        )
     )
-)
+
+with financial_col_2:
+    financial_source_mode = st.selectbox(
+        "Source mode",
+        options=["auto", "pasted_text", "news", "financial", "news_and_financial"],
+        index=0,
+        help=(
+            "auto lets the agent decide. pasted_text uses only your pasted text. "
+            "news uses Finnhub. financial uses Alpha Vantage. news_and_financial tries both."
+        )
+    )
+    financial_symbol_override = st.text_input(
+        "Optional ticker override",
+        value="",
+        placeholder="MSFT"
+    )
+    financial_lookback_days = st.slider(
+        "News lookback days",
+        min_value=3,
+        max_value=30,
+        value=7,
+        step=1,
+        help="Used when the agent fetches company news from Finnhub."
+    )
+    financial_max_news = st.slider(
+        "Maximum news items",
+        min_value=1,
+        max_value=10,
+        value=5,
+        step=1,
+        help="Limits how many retrieved news items are passed to the Report Agent."
+    )
+
 financial_question = st.text_input(
     "Question for report/news simplification",
     value=(
-        "Please simplify this report/news text using only the pasted content. "
-        "Identify the main positive signals, risks, and possible market impact. "
+        "Please simplify this report/news text or source-grounded company snapshot. "
+        "Identify verified source status, main positive signals, risks, and possible market impact. "
         "Do not provide trading advice."
     )
 )
 
-if st.button("Simplify Financial Report / News"):
+if st.button("Simplify / Fetch Financial Report or News"):
     if not financial_text.strip():
-        st.warning("Please paste the actual financial report, earnings news, company announcement, or market commentary first.")
-    elif is_search_like_financial_query(financial_text):
-        st.warning(
-            "This looks like a short news/search query rather than pasted report/news text. "
-            "This app does not search live news in the Financial Simplifier section."
-        )
-        st.info(
-            "Please paste the actual article, report paragraph, earnings excerpt, or company announcement text. "
-            "For example: 'Microsoft reported stronger Azure revenue, but management warned that AI infrastructure costs may rise.'"
-        )
-    elif is_too_short_for_financial_simplifier(financial_text):
-        st.warning(
-            "The pasted text is too short for reliable report/news simplification. "
-            "To avoid LLM hallucination, please paste a longer paragraph from the actual report or news."
-        )
-        st.info("Minimum suggested input: at least 2–3 complete sentences or around 20+ words with concrete information.")
+        st.warning("Please paste financial text or enter a ticker/news/report query first, such as 'MSFT news'.")
     else:
         llm_report_agent = make_llm_agent()
         if llm_report_agent is None:
-            st.warning("Groq Report Agent is not available. Please check agents/llm_report_agent.py, groq installation, and GROQ_API_KEY.")
+            st.error(
+                "Groq Report Agent could not be loaded. Please check agents/llm_report_agent.py, requirements.txt, and environment setup."
+            )
         else:
-            with st.spinner("Groq Report Agent is simplifying the pasted report/news text..."):
-                simplification_result = llm_report_agent.simplify_financial_text(
-                    report_text=financial_text,
-                    user_question=financial_question
-                )
+            with st.spinner("Report Agent is preparing a source-grounded financial/news summary..."):
+                try:
+                    simplification_result = llm_report_agent.simplify_financial_text(
+                        report_text=financial_text,
+                        question=financial_question,
+                        source_mode=financial_source_mode,
+                        symbol=financial_symbol_override.strip().upper() or None,
+                        lookback_days=financial_lookback_days,
+                        max_news=financial_max_news
+                    )
+                except TypeError:
+                    # Backward compatibility with older llm_report_agent.py versions.
+                    simplification_result = llm_report_agent.simplify_financial_text(
+                        report_text=financial_text,
+                        user_question=financial_question
+                    )
+                except Exception as e:
+                    simplification_result = {
+                        "success": False,
+                        "llm_available": False,
+                        "plain_language_report": "Report Agent failed while simplifying the financial/news input.",
+                        "summary": str(e),
+                        "error": str(e)
+                    }
+
             if simplification_result.get("llm_available"):
-                st.success("Financial report/news text simplified successfully.")
+                st.success("Groq financial/news summary generated successfully.")
+            elif simplification_result.get("success"):
+                st.warning(
+                    "Local fallback financial/news summary was used. Groq did not return a live response. "
+                    "The output was still produced safely from available sources."
+                )
+                if simplification_result.get("llm_error"):
+                    with st.expander("Show Groq API error / debug info"):
+                        st.code(simplification_result.get("llm_error"))
+                        if simplification_result.get("llm_debug"):
+                            st.json(simplification_result.get("llm_debug"))
             else:
-                st.warning("Groq API was not available. The system used a fallback explanation or skipped LLM output.")
+                st.error(simplification_result.get("summary", "Financial/news summarization failed."))
+
+            meta_cols = st.columns(4)
+            with meta_cols[0]:
+                st.metric("Detected Symbol", simplification_result.get("symbol") or "N/A")
+            with meta_cols[1]:
+                st.metric("Source", simplification_result.get("source", "N/A"))
+            with meta_cols[2]:
+                st.metric("Mode", simplification_result.get("source_mode", financial_source_mode))
+            with meta_cols[3]:
+                st.metric("LLM", "Groq" if simplification_result.get("llm_available") else "Fallback")
+
+            source_status = simplification_result.get("source_status", []) or []
+            if source_status:
+                st.subheader("Verified Source Status")
+                for item in source_status:
+                    st.write(f"- {item}")
+
+            verified_news = simplification_result.get("verified_news", {}) or {}
+            news_items = verified_news.get("items", []) if isinstance(verified_news, dict) else []
+            excluded_items = verified_news.get("excluded_items", []) if isinstance(verified_news, dict) else []
+            raw_count = verified_news.get("raw_count", 0) if isinstance(verified_news, dict) else 0
+            kept_count = verified_news.get("company_specific_count", len(news_items)) if isinstance(verified_news, dict) else len(news_items)
+            excluded_count = verified_news.get("excluded_count", len(excluded_items)) if isinstance(verified_news, dict) else len(excluded_items)
+
+            if isinstance(verified_news, dict) and (raw_count or kept_count or excluded_count):
+                st.caption(
+                    f"News relevance filter: scanned {raw_count} items, kept {kept_count} company-specific items, "
+                    f"excluded {excluded_count} broad/uncertain items."
+                )
+
+            if news_items:
+                st.subheader("Company-Specific Retrieved News Items")
+                news_df = pd.DataFrame(news_items)
+                display_cols = [
+                    col for col in [
+                        "date", "source", "headline", "summary",
+                        "relevance_score", "relevance_reason", "url"
+                    ]
+                    if col in news_df.columns
+                ]
+                st.dataframe(news_df[display_cols], use_container_width=True, hide_index=True)
+            elif raw_count:
+                st.warning(
+                    "No company-specific news passed the relevance filter. "
+                    "Broad or uncertain headlines were excluded from the report."
+                )
+
+            if excluded_items:
+                with st.expander("Show excluded broad/uncertain news items for audit"):
+                    excluded_df = pd.DataFrame(excluded_items)
+                    display_cols = [
+                        col for col in [
+                            "date", "source", "headline", "summary",
+                            "relevance_score", "relevance_reason", "url"
+                        ]
+                        if col in excluded_df.columns
+                    ]
+                    st.dataframe(excluded_df[display_cols], use_container_width=True, hide_index=True)
+
+            financial_snapshot = simplification_result.get("financial_snapshot", {}) or {}
+            snapshot = financial_snapshot.get("snapshot", {}) if isinstance(financial_snapshot, dict) else {}
+            if snapshot:
+                st.subheader("Financial Snapshot")
+                st.json(snapshot)
+
+            st.subheader("Plain-language Report")
             st.markdown(simplification_result.get("plain_language_report", ""))
+
             with st.expander("Show Financial Text Simplification JSON"):
                 st.json(simplification_result)

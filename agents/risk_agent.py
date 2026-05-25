@@ -6,18 +6,18 @@ import joblib
 
 class RiskAgent:
     """
-    Hybrid Risk Agent.
+    Optimized Hybrid Risk Agent.
 
     Role:
-    1. Rule-based hard safety control
-    2. Q-learning advisory risk adjustment
-    3. Final risk-controlled signal generation
+    1. Applies hard safety rules to prevent unsafe paper decisions.
+    2. Uses a filtered Q-learning advisory layer.
+    3. Separates true downside risk from positive-trend-but-entry-risk situations.
 
-    Design principle:
-    - Risk Agent is the hard safety gate.
-    - Strategist Agent should generate strategy guidance after this agent.
-    - Q-learning should not overrule safe HOLD/NEUTRAL cases into BLOCKED unless a hard safety rule is triggered.
-    - This agent does not execute real trades.
+    Key improvement:
+    - If Analyst Agent reports POSITIVE_BUT_ENTRY_RISK / overbought / elevated entry risk,
+      the Risk Agent no longer treats the stock as a simple low-risk HOLD.
+    - It outputs Medium risk for timing/entry risk and lets the Strategist Agent give
+      WAIT_FOR_PULLBACK_OR_CONFIRMATION guidance.
     """
 
     ACTIONS = ["KEEP_SIGNAL", "DOWNGRADE_TO_HOLD", "BLOCK_TRADE"]
@@ -25,17 +25,49 @@ class RiskAgent:
     ACTION_PRIORITY = {
         "KEEP_SIGNAL": 0,
         "DOWNGRADE_TO_HOLD": 1,
-        "BLOCK_TRADE": 2
+        "BLOCK_TRADE": 2,
     }
 
-    VALID_SIGNALS = ["BUY_CANDIDATE", "HOLD", "SELL_RISK", "BLOCKED"]
+    VALID_SIGNALS = [
+        "BUY_CANDIDATE",
+        "HOLD",
+        "SELL_RISK",
+        "BLOCKED",
+    ]
+
+    ENTRY_RISK_ANALYST_SIGNALS = {
+        "POSITIVE_BUT_ENTRY_RISK",
+        "WATCHLIST_BULLISH_ENTRY_RISK",
+        "BUY_WATCHLIST_OVERBOUGHT",
+        "BUY_WATCHLIST_ENTRY_RISK",
+        "POSITIVE_BUT_OVERBOUGHT",
+    }
+
+    POSITIVE_ANALYST_SIGNALS = {
+        "BULLISH",
+        "BULLISH_MOMENTUM",
+        "WATCHLIST_BULLISH",
+        "POSITIVE",
+        "POSITIVE_BUT_ENTRY_RISK",
+        "WATCHLIST_BULLISH_ENTRY_RISK",
+        "BUY_WATCHLIST_OVERBOUGHT",
+        "BUY_WATCHLIST_ENTRY_RISK",
+        "POSITIVE_BUT_OVERBOUGHT",
+    }
+
+    BEARISH_ANALYST_SIGNALS = {
+        "BEARISH_RISK",
+        "BEARISH",
+        "DOWNSIDE_RISK",
+        "NEGATIVE",
+    }
 
     def __init__(
         self,
         q_table_path: str = "models/risk_q_table.pkl",
         alpha: float = 0.2,
         gamma: float = 0.9,
-        epsilon: float = 0.03
+        epsilon: float = 0.03,
     ):
         self.q_table_path = Path(q_table_path)
         self.q_table_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,67 +95,71 @@ class RiskAgent:
 
         return current
 
-    def _safe_float(self, value, default: float = 0.0):
+    def _safe_float(self, value, default: Optional[float] = 0.0):
         try:
+            if value is None:
+                return default
             return float(value)
         except Exception:
             return default
+
+    def _normalise_signal(self, value: Any, default: str = "Unknown") -> str:
+        if value is None:
+            return default
+        return str(value).strip().upper()
 
     # --------------------------------------------------
     # Q-table helpers
     # --------------------------------------------------
     def _load_q_table(self) -> dict:
-        if self.q_table_path.exists() and self.q_table_path.stat().st_size > 0:
-            try:
-                q_table = joblib.load(self.q_table_path)
-
-                if isinstance(q_table, dict):
-                    return q_table
-
-            except Exception:
-                return {}
-
+        try:
+            if self.q_table_path.exists() and self.q_table_path.stat().st_size > 0:
+                table = joblib.load(self.q_table_path)
+                if isinstance(table, dict):
+                    return table
+        except Exception:
+            pass
         return {}
 
     def _save_q_table(self):
-        self.q_table_path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(self.q_table, self.q_table_path)
 
     def _init_state(self, state: str):
         if not state:
-            state = "Unknown|Unknown|HOLD|UNKNOWN|Unknown"
+            state = "Unknown|Unknown|HOLD|Unknown|Unknown|NoEntryRisk"
 
         if state not in self.q_table:
-            self.q_table[state] = {
-                action: 0.0
-                for action in self.ACTIONS
-            }
+            self.q_table[state] = {action: 0.0 for action in self.ACTIONS}
 
         for action in self.ACTIONS:
-            if action not in self.q_table[state]:
-                self.q_table[state][action] = 0.0
+            self.q_table[state].setdefault(action, 0.0)
 
     # --------------------------------------------------
-    # Input extraction
+    # Input extraction helpers
     # --------------------------------------------------
     def _discretize_confidence(self, validation_result: Dict[str, Any]) -> str:
         if not isinstance(validation_result, dict):
             return "Unknown"
 
-        confidence = validation_result.get("confidence", "Unknown")
+        confidence = (
+            validation_result.get("confidence")
+            or self._get_nested(validation_result, ["validation_for_next_agent", "confidence"])
+        )
 
-        if confidence in ["High", "Medium", "Low"]:
-            return confidence
+        if isinstance(confidence, str):
+            confidence = confidence.strip().capitalize()
+            if confidence in ["High", "Medium", "Low"]:
+                return confidence
 
-        score = validation_result.get("confidence_score", 0.5)
-        score = self._safe_float(score, default=0.5)
+        numeric_confidence = self._safe_float(confidence, default=None)
 
-        if score >= 0.8:
+        if numeric_confidence is None:
+            return "Unknown"
+        if numeric_confidence >= 0.75:
             return "High"
-        elif score >= 0.5:
+        if numeric_confidence >= 0.45:
             return "Medium"
-        else:
-            return "Low"
+        return "Low"
 
     def _get_validation_next_action(self, validation_result: Dict[str, Any]) -> str:
         if not isinstance(validation_result, dict):
@@ -142,15 +178,15 @@ class RiskAgent:
         signal = (
             signal_result.get("model_signal")
             or signal_result.get("signal")
-            or signal_result.get("final_signal")
+            or signal_result.get("final_model_signal")
+            or self._get_nested(signal_result, ["signal_for_next_agent", "model_signal"])
             or self._get_nested(signal_result, ["signal_for_next_agent", "signal"])
+            or self._get_nested(signal_result, ["signal_for_next_agent", "final_model_signal"])
             or "HOLD"
         )
 
-        if signal not in self.VALID_SIGNALS:
-            return "HOLD"
-
-        return signal
+        signal = self._normalise_signal(signal, default="HOLD")
+        return signal if signal in self.VALID_SIGNALS else "HOLD"
 
     def _get_model_confidence_level(self, signal_result: Dict[str, Any]) -> str:
         if not isinstance(signal_result, dict):
@@ -158,31 +194,25 @@ class RiskAgent:
 
         confidence_level = (
             signal_result.get("confidence_level")
+            or signal_result.get("model_confidence_level")
             or self._get_nested(signal_result, ["signal_for_next_agent", "confidence_level"])
+            or self._get_nested(signal_result, ["signal_for_next_agent", "model_confidence_level"])
         )
 
-        if confidence_level in ["High", "Medium", "Low"]:
-            return confidence_level
+        if isinstance(confidence_level, str):
+            confidence_level = confidence_level.strip().capitalize()
+            if confidence_level in ["High", "Medium", "Low"]:
+                return confidence_level
 
-        confidence = (
-            signal_result.get("prediction_confidence")
-            or self._get_nested(signal_result, ["signal_for_next_agent", "prediction_confidence"])
-        )
+        confidence = self._get_prediction_confidence(signal_result)
 
         if confidence is None:
             return "Unknown"
-
-        confidence = self._safe_float(confidence, default=-1.0)
-
-        if confidence < 0:
-            return "Unknown"
-
         if confidence >= 0.65:
             return "High"
-        elif confidence >= 0.45:
+        if confidence >= 0.45:
             return "Medium"
-        else:
-            return "Low"
+        return "Low"
 
     def _get_prediction_confidence(self, signal_result: Dict[str, Any]) -> Optional[float]:
         if not isinstance(signal_result, dict):
@@ -190,25 +220,26 @@ class RiskAgent:
 
         confidence = (
             signal_result.get("prediction_confidence")
+            or signal_result.get("confidence")
             or self._get_nested(signal_result, ["signal_for_next_agent", "prediction_confidence"])
+            or self._get_nested(signal_result, ["signal_for_next_agent", "confidence"])
         )
-
-        if confidence is None:
-            return None
 
         return self._safe_float(confidence, default=None)
 
     def _get_analyst_signal(self, analysis_result: Dict[str, Any]) -> str:
         if not isinstance(analysis_result, dict):
-            return "UNKNOWN"
+            return "Unknown"
 
-        return (
+        signal = (
             analysis_result.get("analyst_signal")
             or self._get_nested(analysis_result, ["analysis_for_next_agent", "analyst_signal"])
-            or "UNKNOWN"
+            or "Unknown"
         )
 
-    def _get_analyst_score(self, analysis_result: Dict[str, Any]):
+        return self._normalise_signal(signal, default="Unknown")
+
+    def _get_analyst_score(self, analysis_result: Dict[str, Any]) -> Optional[float]:
         if not isinstance(analysis_result, dict):
             return None
 
@@ -217,46 +248,147 @@ class RiskAgent:
             or self._get_nested(analysis_result, ["analysis_for_next_agent", "analyst_score"])
         )
 
-        if score is None:
-            return None
-
         return self._safe_float(score, default=None)
+
+    def _get_display_signal(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
+        display = None
+
+        if isinstance(analysis_result, dict):
+            display = (
+                analysis_result.get("display_signal")
+                or self._get_nested(analysis_result, ["analysis_for_next_agent", "display_signal"])
+            )
+
+        if not display and isinstance(signal_result, dict):
+            display = (
+                signal_result.get("display_signal")
+                or signal_result.get("enhanced_signal")
+                or self._get_nested(signal_result, ["signal_for_next_agent", "display_signal"])
+                or self._get_nested(signal_result, ["signal_for_next_agent", "enhanced_signal"])
+            )
+
+        return self._normalise_signal(display, default="Unknown")
+
+    def _get_entry_risk_level(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
+        value = None
+
+        if isinstance(analysis_result, dict):
+            value = (
+                analysis_result.get("entry_risk_level")
+                or analysis_result.get("entry_risk")
+                or analysis_result.get("overbought_risk")
+                or self._get_nested(analysis_result, ["analysis_for_next_agent", "entry_risk_level"])
+                or self._get_nested(analysis_result, ["analysis_for_next_agent", "entry_risk"])
+            )
+
+        if value is None and isinstance(signal_result, dict):
+            value = (
+                signal_result.get("entry_risk_level")
+                or signal_result.get("entry_risk")
+                or self._get_nested(signal_result, ["signal_for_next_agent", "entry_risk_level"])
+                or self._get_nested(signal_result, ["signal_for_next_agent", "entry_risk"])
+            )
+
+        if value is None:
+            return "Unknown"
+
+        text = str(value).strip().replace("_", " ").title()
+
+        if text in ["High", "Elevated", "Medium High", "Moderate High", "Medium", "Low"]:
+            return text
+
+        return str(value).strip()
+
+    def _get_trend_direction(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
+        value = None
+
+        if isinstance(analysis_result, dict):
+            value = (
+                analysis_result.get("trend_direction")
+                or analysis_result.get("trend")
+                or self._get_nested(analysis_result, ["analysis_for_next_agent", "trend_direction"])
+                or self._get_nested(analysis_result, ["analysis_for_next_agent", "trend"])
+            )
+
+        if value is None and isinstance(signal_result, dict):
+            market_context = signal_result.get("market_context", {})
+            if isinstance(market_context, dict):
+                value = market_context.get("trend_direction") or market_context.get("trend")
+
+        if value is None:
+            return "Unknown"
+
+        return str(value).strip().title()
 
     def _get_volatility_level(self, analysis_result: Dict[str, Any]) -> str:
         if not isinstance(analysis_result, dict):
             return "Unknown"
 
-        return (
+        volatility = (
             analysis_result.get("volatility_level")
             or analysis_result.get("historical_volatility_level")
             or self._get_nested(analysis_result, ["analysis_for_next_agent", "volatility_level"])
+            or self._get_nested(analysis_result, ["analysis_for_next_agent", "historical_volatility_level"])
             or "Unknown"
         )
+
+        if isinstance(volatility, str):
+            text = volatility.strip().capitalize()
+            if text in ["High", "Medium", "Low"]:
+                return text
+
+        return str(volatility)
 
     def _get_symbol(
         self,
         validation_result: Dict[str, Any],
         analysis_result: Dict[str, Any],
-        signal_result: Dict[str, Any]
+        signal_result: Dict[str, Any],
     ) -> str:
         symbol = None
 
-        if isinstance(analysis_result, dict):
-            symbol = analysis_result.get("symbol")
+        for result in [signal_result, analysis_result, validation_result]:
+            if not isinstance(result, dict):
+                continue
 
-        if not symbol and isinstance(signal_result, dict):
             symbol = (
-                signal_result.get("symbol")
-                or self._get_nested(signal_result, ["signal_for_next_agent", "symbol"])
+                result.get("symbol")
+                or self._get_nested(result, ["signal_for_next_agent", "symbol"])
+                or self._get_nested(result, ["analysis_for_next_agent", "symbol"])
+                or self._get_nested(result, ["validation_for_next_agent", "symbol"])
             )
 
-        if not symbol and isinstance(validation_result, dict):
-            symbol = self._get_nested(validation_result, ["validation_for_next_agent", "symbol"])
+            if symbol:
+                break
 
-        if not symbol:
-            symbol = "UNKNOWN"
+        return str(symbol or "UNKNOWN").upper()
 
-        return str(symbol).upper()
+    def _has_positive_entry_risk_context(
+        self,
+        analyst_signal: str,
+        analyst_score: Optional[float],
+        display_signal: str,
+        entry_risk_level: str,
+        trend_direction: str,
+    ) -> bool:
+        analyst_signal = self._normalise_signal(analyst_signal, default="Unknown")
+        display_signal = self._normalise_signal(display_signal, default="Unknown")
+        entry_text = str(entry_risk_level or "").lower()
+        trend_text = str(trend_direction or "").lower()
+
+        if analyst_signal in self.ENTRY_RISK_ANALYST_SIGNALS:
+            return True
+
+        if "ENTRY_RISK" in display_signal or "OVERBOUGHT" in display_signal:
+            return True
+
+        if entry_text in ["elevated", "high", "medium high", "moderate high"]:
+            return True
+
+        if "positive" in trend_text and analyst_score is not None and analyst_score >= 0.70:
+            return True
+
+        return False
 
     # --------------------------------------------------
     # State construction
@@ -265,20 +397,33 @@ class RiskAgent:
         self,
         validation_result: Dict[str, Any],
         analysis_result: Dict[str, Any],
-        signal_result: Dict[str, Any]
+        signal_result: Dict[str, Any],
     ) -> str:
         validation_confidence = self._discretize_confidence(validation_result)
         volatility = self._get_volatility_level(analysis_result)
         model_signal = self._get_model_signal(signal_result)
         analyst_signal = self._get_analyst_signal(analysis_result)
+        analyst_score = self._get_analyst_score(analysis_result)
         model_confidence = self._get_model_confidence_level(signal_result)
+        display_signal = self._get_display_signal(analysis_result, signal_result)
+        entry_risk_level = self._get_entry_risk_level(analysis_result, signal_result)
+        trend_direction = self._get_trend_direction(analysis_result, signal_result)
+
+        entry_context = "EntryRisk" if self._has_positive_entry_risk_context(
+            analyst_signal=analyst_signal,
+            analyst_score=analyst_score,
+            display_signal=display_signal,
+            entry_risk_level=entry_risk_level,
+            trend_direction=trend_direction,
+        ) else "NoEntryRisk"
 
         return (
             f"{validation_confidence}|"
             f"{volatility}|"
             f"{model_signal}|"
             f"{analyst_signal}|"
-            f"{model_confidence}"
+            f"{model_confidence}|"
+            f"{entry_context}"
         )
 
     # --------------------------------------------------
@@ -288,25 +433,28 @@ class RiskAgent:
         self,
         validation_result: Dict[str, Any],
         analysis_result: Dict[str, Any],
-        signal_result: Dict[str, Any]
+        signal_result: Dict[str, Any],
     ) -> Tuple[str, List[str], bool]:
-        """
-        Returns:
-        - rule_action
-        - rule_reasons
-        - hard_block_triggered
-
-        hard_block_triggered is important:
-        Q-learning is not allowed to create BLOCK_TRADE by itself unless this is True.
-        """
         validation_confidence = self._discretize_confidence(validation_result)
         validation_next_action = self._get_validation_next_action(validation_result)
         volatility = self._get_volatility_level(analysis_result)
         model_signal = self._get_model_signal(signal_result)
         analyst_signal = self._get_analyst_signal(analysis_result)
+        analyst_score = self._get_analyst_score(analysis_result)
         model_confidence = self._get_model_confidence_level(signal_result)
+        display_signal = self._get_display_signal(analysis_result, signal_result)
+        entry_risk_level = self._get_entry_risk_level(analysis_result, signal_result)
+        trend_direction = self._get_trend_direction(analysis_result, signal_result)
 
-        reasons = []
+        positive_entry_risk = self._has_positive_entry_risk_context(
+            analyst_signal=analyst_signal,
+            analyst_score=analyst_score,
+            display_signal=display_signal,
+            entry_risk_level=entry_risk_level,
+            trend_direction=trend_direction,
+        )
+
+        reasons: List[str] = []
 
         if validation_next_action == "BLOCK_ANALYSIS":
             reasons.append("Validation Agent blocked downstream analysis.")
@@ -318,6 +466,18 @@ class RiskAgent:
                 return "BLOCK_TRADE", reasons, True
 
             reasons.append("Validation confidence is Low, so the signal is downgraded to HOLD.")
+            return "DOWNGRADE_TO_HOLD", reasons, False
+
+        if positive_entry_risk and model_signal == "BUY_CANDIDATE":
+            reasons.append(
+                "Analyst Agent detected positive trend with elevated entry timing risk, so BUY_CANDIDATE is softened to HOLD."
+            )
+            return "DOWNGRADE_TO_HOLD", reasons, False
+
+        if positive_entry_risk and model_signal == "SELL_RISK":
+            reasons.append(
+                "Model predicted SELL_RISK, but Analyst Agent indicates a positive trend with entry risk rather than clear downside risk. The signal is softened to HOLD."
+            )
             return "DOWNGRADE_TO_HOLD", reasons, False
 
         if model_confidence == "Low" and model_signal == "BUY_CANDIDATE":
@@ -336,7 +496,7 @@ class RiskAgent:
             reasons.append("Model detected SELL_RISK, which is already a cautious signal.")
             return "KEEP_SIGNAL", reasons, False
 
-        if analyst_signal in ["BEARISH_RISK", "BEARISH"]:
+        if analyst_signal in self.BEARISH_ANALYST_SIGNALS:
             reasons.append(f"Analyst Agent detected {analyst_signal}.")
             return "KEEP_SIGNAL", reasons, False
 
@@ -353,32 +513,25 @@ class RiskAgent:
         volatility = parts[1] if len(parts) > 1 else "Unknown"
         model_signal = parts[2] if len(parts) > 2 else "HOLD"
         model_confidence = parts[4] if len(parts) > 4 else "Unknown"
+        entry_context = parts[5] if len(parts) > 5 else "NoEntryRisk"
 
         if validation_confidence == "Low" and model_signal == "BUY_CANDIDATE":
             return "BLOCK_TRADE"
 
         if model_signal == "BUY_CANDIDATE":
-            if model_confidence == "Low":
+            if model_confidence == "Low" or volatility == "High" or validation_confidence == "Medium":
                 return "DOWNGRADE_TO_HOLD"
 
-            if volatility == "High":
+            if entry_context == "EntryRisk":
                 return "DOWNGRADE_TO_HOLD"
 
-            if validation_confidence == "Medium":
-                return "DOWNGRADE_TO_HOLD"
+        if model_signal == "SELL_RISK" and entry_context == "EntryRisk":
+            return "DOWNGRADE_TO_HOLD"
 
         return "KEEP_SIGNAL"
 
     def _choose_q_action(self, state: str) -> str:
-        """
-        Epsilon-greedy Q-learning advisory action.
-
-        Important:
-        This only produces a raw advisory action.
-        It will be filtered later so that Q-learning does not over-block safe HOLD cases.
-        """
         self._init_state(state)
-
         values = self.q_table[state]
 
         if all(value == 0.0 for value in values.values()):
@@ -388,17 +541,12 @@ class RiskAgent:
             return random.choice(self.ACTIONS)
 
         max_q = max(values.values())
-
-        best_actions = [
-            action
-            for action, value in values.items()
-            if value == max_q
-        ]
+        best_actions = [action for action, value in values.items() if value == max_q]
 
         best_actions = sorted(
             best_actions,
             key=lambda action: self.ACTION_PRIORITY.get(action, 0),
-            reverse=True
+            reverse=True,
         )
 
         return best_actions[0]
@@ -411,17 +559,9 @@ class RiskAgent:
         validation_next_action: str,
         volatility_level: str,
         model_confidence: str,
-        hard_block_triggered: bool
+        hard_block_triggered: bool,
+        positive_entry_risk: bool,
     ) -> Tuple[str, str]:
-        """
-        Filter Q-learning output to avoid over-conservative behavior.
-
-        Core rule:
-        - Q-learning cannot create BLOCK_TRADE by itself.
-        - BLOCK_TRADE is only allowed when a hard rule already triggered block.
-        - HOLD and SELL_RISK should not be downgraded by Q-learning.
-        """
-
         if raw_q_action not in self.ACTIONS:
             return "KEEP_SIGNAL", "Invalid Q-learning action was normalized to KEEP_SIGNAL."
 
@@ -435,12 +575,13 @@ class RiskAgent:
             if validation_confidence == "Low" and model_signal == "BUY_CANDIDATE":
                 return "BLOCK_TRADE", "Q-learning BLOCK_TRADE kept because validation is Low and signal is BUY_CANDIDATE."
 
-            if model_signal == "BUY_CANDIDATE":
-                if volatility_level == "High" or model_confidence == "Low":
-                    return "DOWNGRADE_TO_HOLD", (
-                        "Q-learning suggested BLOCK_TRADE, but no hard block was triggered. "
-                        "For a risky BUY_CANDIDATE, it was softened to DOWNGRADE_TO_HOLD."
-                    )
+            if model_signal == "BUY_CANDIDATE" and (
+                volatility_level == "High" or model_confidence == "Low" or positive_entry_risk
+            ):
+                return "DOWNGRADE_TO_HOLD", (
+                    "Q-learning suggested BLOCK_TRADE, but no hard block was triggered. "
+                    "For a risky BUY_CANDIDATE, it was softened to DOWNGRADE_TO_HOLD."
+                )
 
             return "KEEP_SIGNAL", (
                 "Q-learning suggested BLOCK_TRADE, but no hard block was triggered. "
@@ -451,8 +592,13 @@ class RiskAgent:
             if model_signal == "BUY_CANDIDATE":
                 return "DOWNGRADE_TO_HOLD", "Q-learning DOWNGRADE_TO_HOLD is allowed for BUY_CANDIDATE."
 
+            if model_signal == "SELL_RISK" and positive_entry_risk:
+                return "DOWNGRADE_TO_HOLD", (
+                    "Q-learning DOWNGRADE_TO_HOLD is allowed because SELL_RISK conflicts with positive-trend entry-risk context."
+                )
+
             return "KEEP_SIGNAL", (
-                "Q-learning suggested DOWNGRADE_TO_HOLD, but the signal is not BUY_CANDIDATE. "
+                "Q-learning suggested DOWNGRADE_TO_HOLD, but the signal is not a risky BUY_CANDIDATE or positive-entry-risk SELL_RISK. "
                 "It was filtered to KEEP_SIGNAL."
             )
 
@@ -465,14 +611,8 @@ class RiskAgent:
         self,
         rule_action: str,
         filtered_q_action: str,
-        hard_block_triggered: bool
+        hard_block_triggered: bool,
     ) -> str:
-        """
-        Combine rule-based action and filtered Q-learning action.
-
-        Hard rule dominates.
-        Q-learning can make BUY_CANDIDATE more conservative, but cannot create hard block alone.
-        """
         if hard_block_triggered or rule_action == "BLOCK_TRADE":
             return "BLOCK_TRADE"
 
@@ -489,7 +629,7 @@ class RiskAgent:
             return "BLOCKED"
 
         if risk_action == "DOWNGRADE_TO_HOLD":
-            if model_signal == "BUY_CANDIDATE":
+            if model_signal in ["BUY_CANDIDATE", "SELL_RISK"]:
                 return "HOLD"
             return model_signal
 
@@ -501,7 +641,8 @@ class RiskAgent:
         volatility_level: str,
         model_confidence: str,
         final_signal: str,
-        risk_action: str
+        risk_action: str,
+        positive_entry_risk: bool,
     ) -> str:
         if risk_action == "BLOCK_TRADE" or final_signal == "BLOCKED":
             return "Critical"
@@ -514,6 +655,10 @@ class RiskAgent:
 
         if validation_confidence == "Low":
             return "High"
+
+        # Main optimization: positive trend with elevated entry/chasing risk is not Low risk.
+        if positive_entry_risk:
+            return "Medium"
 
         if risk_action == "DOWNGRADE_TO_HOLD":
             return "Medium"
@@ -533,47 +678,46 @@ class RiskAgent:
         self,
         validation_result: Dict[str, Any],
         analysis_result: Dict[str, Any],
-        signal_result: Dict[str, Any]
+        signal_result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        agent_goal = "Apply hard safety rules and filtered Q-learning risk adjustment to the trading signal."
-
-        if not isinstance(validation_result, dict):
-            validation_result = {}
-
-        if not isinstance(analysis_result, dict):
-            analysis_result = {}
-
-        if not isinstance(signal_result, dict):
-            signal_result = {}
-
-        state = self._build_state(
-            validation_result=validation_result,
-            analysis_result=analysis_result,
-            signal_result=signal_result
+        agent_goal = (
+            "Apply hard safety rules and filtered Q-learning risk adjustment while separating downside risk from entry timing risk."
         )
 
+        validation_result = validation_result if isinstance(validation_result, dict) else {}
+        analysis_result = analysis_result if isinstance(analysis_result, dict) else {}
+        signal_result = signal_result if isinstance(signal_result, dict) else {}
+
+        state = self._build_state(validation_result, analysis_result, signal_result)
         self._init_state(state)
 
-        symbol = self._get_symbol(
-            validation_result=validation_result,
-            analysis_result=analysis_result,
-            signal_result=signal_result
-        )
+        symbol = self._get_symbol(validation_result, analysis_result, signal_result)
 
         validation_confidence = self._discretize_confidence(validation_result)
         validation_next_action = self._get_validation_next_action(validation_result)
         volatility_level = self._get_volatility_level(analysis_result)
         analyst_signal = self._get_analyst_signal(analysis_result)
         analyst_score = self._get_analyst_score(analysis_result)
+        display_signal = self._get_display_signal(analysis_result, signal_result)
+        entry_risk_level = self._get_entry_risk_level(analysis_result, signal_result)
+        trend_direction = self._get_trend_direction(analysis_result, signal_result)
 
         model_signal = self._get_model_signal(signal_result)
         model_confidence = self._get_model_confidence_level(signal_result)
         prediction_confidence = self._get_prediction_confidence(signal_result)
 
+        positive_entry_risk = self._has_positive_entry_risk_context(
+            analyst_signal=analyst_signal,
+            analyst_score=analyst_score,
+            display_signal=display_signal,
+            entry_risk_level=entry_risk_level,
+            trend_direction=trend_direction,
+        )
+
         rule_action, rule_reasons, hard_block_triggered = self._rule_based_safety_action(
             validation_result=validation_result,
             analysis_result=analysis_result,
-            signal_result=signal_result
+            signal_result=signal_result,
         )
 
         raw_q_learning_action = self._choose_q_action(state)
@@ -585,18 +729,19 @@ class RiskAgent:
             validation_next_action=validation_next_action,
             volatility_level=volatility_level,
             model_confidence=model_confidence,
-            hard_block_triggered=hard_block_triggered
+            hard_block_triggered=hard_block_triggered,
+            positive_entry_risk=positive_entry_risk,
         )
 
         final_risk_action = self._combine_rule_and_q_action(
             rule_action=rule_action,
             filtered_q_action=filtered_q_learning_action,
-            hard_block_triggered=hard_block_triggered
+            hard_block_triggered=hard_block_triggered,
         )
 
         final_signal = self._apply_risk_action(
             model_signal=model_signal,
-            risk_action=final_risk_action
+            risk_action=final_risk_action,
         )
 
         risk_level = self._risk_level(
@@ -604,15 +749,25 @@ class RiskAgent:
             volatility_level=volatility_level,
             model_confidence=model_confidence,
             final_signal=final_signal,
-            risk_action=final_risk_action
+            risk_action=final_risk_action,
+            positive_entry_risk=positive_entry_risk,
         )
 
         q_values_for_state = self.q_table.get(state, {})
 
+        risk_interpretation = (
+            "Entry timing risk / possible chase risk"
+            if positive_entry_risk and final_signal == "HOLD"
+            else "Downside or data-quality risk"
+            if risk_level in ["High", "Critical"] or final_signal in ["SELL_RISK", "BLOCKED"]
+            else "Normal monitoring risk"
+        )
+
         reasoning_steps = [
             f"Built Q-learning state: {state}.",
             f"Validation confidence: {validation_confidence}; validation next action: {validation_next_action}.",
-            f"Analyst signal: {analyst_signal}; analyst score: {analyst_score}.",
+            f"Analyst signal: {analyst_signal}; analyst score: {analyst_score}; display signal: {display_signal}.",
+            f"Trend direction: {trend_direction}; entry risk level: {entry_risk_level}; positive entry-risk context: {positive_entry_risk}.",
             f"Volatility level: {volatility_level}.",
             f"Original model signal: {model_signal}.",
             f"Model confidence level: {model_confidence}; prediction confidence: {prediction_confidence}.",
@@ -624,18 +779,17 @@ class RiskAgent:
             f"Q-learning filter reason: {q_filter_reason}",
             f"Final risk action selected: {final_risk_action}.",
             f"Final signal after risk adjustment: {final_signal}.",
-            f"Estimated risk level: {risk_level}."
+            f"Estimated risk level: {risk_level}; interpretation: {risk_interpretation}.",
         ]
 
         explanation_for_llm = (
-            f"The original model signal for {symbol} was {model_signal} with "
-            f"{model_confidence.lower()} model confidence. Validation confidence was "
-            f"{validation_confidence}, analyst signal was {analyst_signal}, and volatility was "
-            f"{volatility_level}. The hard safety layer suggested {rule_action}. "
-            f"The raw Q-learning advisory action was {raw_q_learning_action}, but after safety "
-            f"filtering it became {filtered_q_learning_action}. The final risk action is "
-            f"{final_risk_action}, so the final signal becomes {final_signal}. "
-            f"The estimated risk level is {risk_level}."
+            f"The original model signal for {symbol} was {model_signal} with {model_confidence.lower()} model confidence. "
+            f"Validation confidence was {validation_confidence}, analyst signal was {analyst_signal}, trend direction was {trend_direction}, "
+            f"entry risk level was {entry_risk_level}, and volatility was {volatility_level}. "
+            f"Positive entry-risk context was {positive_entry_risk}. The hard safety layer suggested {rule_action}. "
+            f"The raw Q-learning advisory action was {raw_q_learning_action}, and after filtering it became {filtered_q_learning_action}. "
+            f"The final risk action is {final_risk_action}, so the final signal becomes {final_signal}. "
+            f"The estimated risk level is {risk_level}, mainly interpreted as {risk_interpretation}."
         )
 
         risk_for_next_agent = {
@@ -644,11 +798,16 @@ class RiskAgent:
             "final_signal": final_signal,
             "risk_level": risk_level,
             "risk_action": final_risk_action,
+            "risk_interpretation": risk_interpretation,
             "q_state": state,
             "validation_confidence": validation_confidence,
             "validation_next_action": validation_next_action,
             "analyst_signal": analyst_signal,
             "analyst_score": analyst_score,
+            "display_signal": display_signal,
+            "trend_direction": trend_direction,
+            "entry_risk_level": entry_risk_level,
+            "positive_entry_risk_context": positive_entry_risk,
             "volatility_level": volatility_level,
             "model_confidence_level": model_confidence,
             "prediction_confidence": prediction_confidence,
@@ -660,7 +819,7 @@ class RiskAgent:
             "q_filter_reason": q_filter_reason,
             "q_values_for_state": q_values_for_state,
             "human_review_required": True,
-            "explanation_for_llm": explanation_for_llm
+            "explanation_for_llm": explanation_for_llm,
         }
 
         return {
@@ -675,6 +834,10 @@ class RiskAgent:
             "validation_next_action": validation_next_action,
             "analyst_signal": analyst_signal,
             "analyst_score": analyst_score,
+            "display_signal": display_signal,
+            "trend_direction": trend_direction,
+            "entry_risk_level": entry_risk_level,
+            "positive_entry_risk_context": positive_entry_risk,
             "volatility_level": volatility_level,
             "rule_based_action": rule_action,
             "rule_reasons": rule_reasons,
@@ -685,6 +848,7 @@ class RiskAgent:
             "risk_action": final_risk_action,
             "final_signal": final_signal,
             "risk_level": risk_level,
+            "risk_interpretation": risk_interpretation,
             "q_values_for_state": q_values_for_state,
             "q_table_path": str(self.q_table_path),
             "human_review_required": True,
@@ -695,7 +859,7 @@ class RiskAgent:
             "summary": (
                 f"Risk Agent adjusted signal from {model_signal} to {final_signal} "
                 f"with risk level {risk_level}."
-            )
+            ),
         }
 
     # --------------------------------------------------
@@ -705,60 +869,60 @@ class RiskAgent:
         self,
         signal_result: Dict[str, Any],
         analysis_result: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None
+        validation_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.assess_risk(
             validation_result=validation_result or {},
             analysis_result=analysis_result or {},
-            signal_result=signal_result or {}
+            signal_result=signal_result or {},
         )
 
     def adjust_risk(
         self,
         signal_result: Dict[str, Any],
         analysis_result: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None
+        validation_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.apply_risk_control(
             signal_result=signal_result,
             analysis_result=analysis_result,
-            validation_result=validation_result
+            validation_result=validation_result,
         )
 
     def evaluate_risk(
         self,
         signal_result: Dict[str, Any],
         analysis_result: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None
+        validation_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.apply_risk_control(
             signal_result=signal_result,
             analysis_result=analysis_result,
-            validation_result=validation_result
+            validation_result=validation_result,
         )
 
     def control_risk(
         self,
         signal_result: Dict[str, Any],
         analysis_result: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None
+        validation_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.apply_risk_control(
             signal_result=signal_result,
             analysis_result=analysis_result,
-            validation_result=validation_result
+            validation_result=validation_result,
         )
 
     def run(
         self,
         signal_result: Dict[str, Any],
         analysis_result: Optional[Dict[str, Any]] = None,
-        validation_result: Optional[Dict[str, Any]] = None
+        validation_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.apply_risk_control(
             signal_result=signal_result,
             analysis_result=analysis_result,
-            validation_result=validation_result
+            validation_result=validation_result,
         )
 
     # --------------------------------------------------
@@ -768,19 +932,16 @@ class RiskAgent:
         self,
         final_signal: str,
         future_return: float,
-        volatility_level: str = "Unknown"
+        volatility_level: str = "Unknown",
     ) -> float:
-        future_return = self._safe_float(future_return, default=0.0)
+        future_return = self._safe_float(future_return, default=0.0) or 0.0
 
         if final_signal == "BUY_CANDIDATE":
             reward = future_return
-
         elif final_signal == "SELL_RISK":
             reward = -future_return
-
         elif final_signal == "HOLD":
             reward = -abs(future_return) * 0.2
-
         elif final_signal == "BLOCKED":
             if future_return < -0.015:
                 reward = abs(future_return)
@@ -788,7 +949,6 @@ class RiskAgent:
                 reward = -future_return * 0.5
             else:
                 reward = 0.005
-
         else:
             reward = 0.0
 
@@ -802,19 +962,18 @@ class RiskAgent:
         state: str,
         action: str,
         reward: float,
-        next_state: Optional[str] = None
+        next_state: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not state:
             return {
                 "success": False,
-                "summary": "Cannot update Q-table because state is missing."
+                "summary": "Cannot update Q-table because state is missing.",
             }
 
         if action not in self.ACTIONS:
             action = "KEEP_SIGNAL"
 
-        reward = self._safe_float(reward, default=0.0)
-
+        reward = self._safe_float(reward, default=0.0) or 0.0
         self._init_state(state)
 
         current_q = self.q_table[state].get(action, 0.0)
@@ -825,10 +984,7 @@ class RiskAgent:
         else:
             max_next_q = 0.0
 
-        new_q = current_q + self.alpha * (
-            reward + self.gamma * max_next_q - current_q
-        )
-
+        new_q = current_q + self.alpha * (reward + self.gamma * max_next_q - current_q)
         self.q_table[state][action] = new_q
         self._save_q_table()
 
@@ -843,18 +999,18 @@ class RiskAgent:
             "summary": (
                 f"Updated Q-value for state={state}, action={action}: "
                 f"{current_q:.4f} → {new_q:.4f}."
-            )
+            ),
         }
 
     def update_from_feedback(
         self,
         risk_result: Dict[str, Any],
-        future_return: float
+        future_return: float,
     ) -> Dict[str, Any]:
         if not isinstance(risk_result, dict):
             return {
                 "success": False,
-                "summary": "Cannot update Q-table because risk_result is invalid."
+                "summary": "Cannot update Q-table because risk_result is invalid.",
             }
 
         state = risk_result.get("q_state")
@@ -866,7 +1022,7 @@ class RiskAgent:
         if not state or not action:
             return {
                 "success": False,
-                "summary": "Cannot update Q-table because state or action is missing."
+                "summary": "Cannot update Q-table because state or action is missing.",
             }
 
         if not volatility_level:
@@ -875,13 +1031,13 @@ class RiskAgent:
         reward = self.calculate_reward(
             final_signal=final_signal,
             future_return=future_return,
-            volatility_level=volatility_level
+            volatility_level=volatility_level,
         )
 
         update_result = self.update_q_value(
             state=state,
             action=action,
-            reward=reward
+            reward=reward,
         )
 
         update_result["final_signal"] = final_signal
