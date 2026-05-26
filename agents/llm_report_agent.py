@@ -412,29 +412,53 @@ class LLMReportAgent:
         return None
 
     def _is_query_like(self, text: str) -> bool:
-        text_l = (text or "").lower().strip()
+        """Return True for ticker/query inputs, not for real pasted report sentences.
 
-        query_terms = [
-            "news",
-            "this week",
-            "latest",
-            "recent",
-            "financial report",
-            "annual report",
-            "earnings",
-            "last year",
-            "last years",
-            "fetch",
-            "search",
-            "report for",
-            "about",
-            "quarterly",
-            "income statement",
-            "company news",
-            "what happened"
+        Earlier versions treated any sentence containing words such as "latest"
+        as a query. That caused pasted sentences like "reported stronger revenue
+        in the latest quarter" to be routed to live news/financial APIs instead
+        of being summarized as pasted content.
+        """
+        text_l = (text or "").lower().strip()
+        if not text_l:
+            return False
+
+        words = re.findall(r"\b\w+\b", text_l)
+        has_reporting_verb = any(
+            term in text_l
+            for term in [
+                "reported", "announced", "warned", "said", "stated",
+                "management warned", "company reported", "revenue", "margin"
+            ]
+        )
+
+        # A real pasted paragraph/sentence should not be treated as a search query
+        # just because it contains words like latest/recent/quarter.
+        if len(words) >= 8 and has_reporting_verb:
+            direct_search_phrases = [
+                "latest news", "recent news", "company news", "search news",
+                "fetch news", "find news", "what happened"
+            ]
+            return any(phrase in text_l for phrase in direct_search_phrases)
+
+        query_phrases = [
+            "latest news", "recent news", "this week", "financial report",
+            "annual report", "earnings", "last year", "last years",
+            "fetch", "search", "report for", "income statement",
+            "company news", "what happened"
         ]
 
-        return any(term in text_l for term in query_terms)
+        if any(term in text_l for term in query_phrases):
+            return True
+
+        # Short ticker-style queries such as "MSFT news" or "AAPL earnings".
+        if len(words) <= 6 and any(
+            term in words
+            for term in ["news", "report", "earnings", "financial", "announcement", "update"]
+        ):
+            return True
+
+        return False
 
     def _has_concrete_pasted_content(self, text: str) -> bool:
         text_l = (text or "").lower()
@@ -452,6 +476,58 @@ class LLMReportAgent:
         has_number = bool(re.search(r"(\$|%|\d)", text_l))
 
         return len(words) >= 8 and (has_concrete_term or has_number)
+
+    def _infer_effective_source_mode(self, user_text: str, requested_mode: str) -> Tuple[str, Optional[str]]:
+        """
+        Infer the actual source mode from the user's query to avoid stale dropdown bugs.
+
+        If the UI sends source_mode='financial' but the user text says 'MSFT news',
+        the agent should fetch news instead of silently using the stale financial mode.
+        """
+        requested = (requested_mode or "auto").strip().lower()
+        if requested == "both":
+            requested = "news_and_financial"
+
+        text_l = (user_text or "").lower().strip()
+
+        valid_modes = {"auto", "pasted_text", "news", "financial", "news_and_financial"}
+        if requested not in valid_modes:
+            requested = "auto"
+
+        # For actual pasted report/news paragraphs, trust the pasted text when mode is auto.
+        if self._has_concrete_pasted_content(user_text) and not self._is_query_like(user_text):
+            if requested == "auto":
+                return "pasted_text", "Detected pasted financial/news text; used pasted_text mode."
+            return requested, None
+
+        asks_news = any(
+            phrase in text_l
+            for phrase in [
+                "news", "headline", "headlines", "announcement", "announcements",
+                "latest", "recent", "this week", "what happened", "update"
+            ]
+        )
+        asks_financial = any(
+            phrase in text_l
+            for phrase in [
+                "financial", "financial report", "report", "earnings", "annual",
+                "quarter", "quarterly", "income statement", "revenue", "profit", "eps"
+            ]
+        )
+
+        if asks_news and asks_financial:
+            inferred = "news_and_financial"
+        elif asks_news:
+            inferred = "news"
+        elif asks_financial:
+            inferred = "financial"
+        else:
+            inferred = requested
+
+        if inferred != requested:
+            return inferred, f"Requested source mode '{requested}' was changed to '{inferred}' because the input text clearly asks for {inferred.replace('_', ' ')}."
+
+        return inferred, None
 
     def _safe_int_or_none(self, value: Any) -> Optional[int]:
         try:
@@ -842,25 +918,50 @@ class LLMReportAgent:
         lookback_days: int,
         max_news: int
     ) -> Dict[str, Any]:
-        symbol = self._extract_symbol(user_text, explicit_symbol=symbol)
+        # Prefer a clearly detected ticker/company from the user's text.
+        # This prevents a stale optional UI ticker field from overriding a query
+        # such as "AAPL news" with a previous value like "MSFT".
+        detected_from_text = self._extract_symbol(user_text, explicit_symbol=None)
+        explicit_symbol = symbol.strip().upper() if isinstance(symbol, str) and symbol.strip() else None
+
+        source_status: List[str] = []
+
+        if detected_from_text:
+            resolved_symbol = detected_from_text
+            if explicit_symbol and explicit_symbol != detected_from_text:
+                source_status.append(
+                    f"Input text contained {detected_from_text}; ignored optional ticker fallback {explicit_symbol} to avoid a stale-symbol mismatch."
+                )
+        else:
+            resolved_symbol = explicit_symbol
+            if explicit_symbol:
+                source_status.append(
+                    f"No ticker was detected in the text, so optional ticker fallback {explicit_symbol} was used."
+                )
+
+        effective_mode, mode_note = self._infer_effective_source_mode(user_text, source_mode)
+        if mode_note:
+            source_status.append(mode_note)
 
         context = {
-            "mode": source_mode,
-            "symbol": symbol,
+            "mode": effective_mode,
+            "requested_mode": source_mode,
+            "symbol": resolved_symbol,
             "user_text": user_text,
             "pasted_content_used": False,
             "verified_news": {},
             "financial_snapshot": {},
-            "source_status": []
+            "source_status": source_status
         }
 
-        if not symbol:
+        if not resolved_symbol:
             context["source_status"].append(
                 "No ticker/company name was detected, so no live source was fetched."
             )
             return context
 
-        mode_l = (source_mode or "auto").lower()
+        symbol = resolved_symbol
+        mode_l = effective_mode
         text_l = (user_text or "").lower()
 
         if mode_l == "auto":
@@ -1242,6 +1343,7 @@ class LLMReportAgent:
         - user_question=
         """
         report_text = report_text or ""
+        explicit_symbol = symbol.strip().upper() if isinstance(symbol, str) and symbol.strip() else None
 
         if question is None:
             question = (
@@ -1250,6 +1352,17 @@ class LLMReportAgent:
                 or kwargs.get("prompt")
                 or "Simplify this financial report/news text. Identify the main positive signals, risks, and possible market impact. Do not provide trading advice."
             )
+
+        if not report_text.strip() and explicit_symbol:
+            mode_l = (source_mode or "auto").lower()
+            if mode_l == "financial":
+                report_text = f"{explicit_symbol} financial report"
+            elif mode_l == "news":
+                report_text = f"{explicit_symbol} news"
+            elif mode_l in ["news_and_financial", "both"]:
+                report_text = f"{explicit_symbol} news and financial report"
+            else:
+                report_text = f"{explicit_symbol} news and financial report"
 
         if not report_text.strip():
             return {
@@ -1261,14 +1374,14 @@ class LLMReportAgent:
                 "provider": "groq",
                 "model": self.model,
                 "llm_available": False,
-                "llm_error": "No input text was provided.",
-                "symbol": None,
+                "llm_error": "No input text or ticker fallback was provided.",
+                "symbol": explicit_symbol,
                 "source_mode": source_mode,
                 "source_status": [],
                 "verified_news": {},
                 "financial_snapshot": {},
                 "plain_language_report": "No report/news text or ticker query was provided.",
-                "summary": "No input text was provided."
+                "summary": "No input text or ticker fallback was provided."
             }
 
         is_concrete_paste = self._has_concrete_pasted_content(report_text)
@@ -1343,7 +1456,8 @@ class LLMReportAgent:
             "llm_error": llm_error,
             "llm_debug": groq_result.get("llm_debug"),
             "symbol": context.get("symbol"),
-            "source_mode": source_mode,
+            "source_mode": context.get("mode", source_mode),
+            "requested_source_mode": context.get("requested_mode", source_mode),
             "source_status": context.get("source_status", []),
             "verified_news": context.get("verified_news", {}),
             "financial_snapshot": context.get("financial_snapshot", {}),

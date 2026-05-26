@@ -1,5 +1,5 @@
-import os
 import traceback
+import html
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -21,7 +21,7 @@ try:
 except Exception:
     LLMReportAgent = None
 
-load_dotenv(override=True)
+load_dotenv()
 
 st.set_page_config(
     page_title="Human-in-the-Loop Multi-Agent Trading System",
@@ -64,104 +64,6 @@ def get_nested(data, keys, default=None):
         if current is None:
             return default
     return current
-
-
-def safe_text(value, default="N/A"):
-    """Convert values to readable UI text."""
-    if value is None:
-        return default
-    value = str(value)
-    return value if value.strip() else default
-
-
-def numeric_fmt(value, digits=3, default="N/A"):
-    try:
-        if value is None:
-            return default
-        return f"{float(value):.{digits}f}"
-    except Exception:
-        return safe_text(value, default)
-
-
-def get_signal_display(signal_result):
-    return (
-        signal_result.get("display_signal")
-        or signal_result.get("enhanced_signal")
-        or get_nested(signal_result, ["signal_for_next_agent", "display_signal"])
-        or get_nested(signal_result, ["signal_for_next_agent", "enhanced_signal"])
-        or signal_result.get("model_signal")
-        or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
-    )
-
-
-def get_risk_interpretation(risk_result):
-    return (
-        risk_result.get("risk_interpretation")
-        or risk_result.get("risk_theme")
-        or risk_result.get("risk_note")
-        or get_nested(risk_result, ["risk_for_next_agent", "risk_interpretation"])
-        or get_nested(risk_result, ["risk_for_next_agent", "risk_theme"])
-        or get_nested(risk_result, ["risk_for_next_agent", "risk_note"])
-        or "No additional risk interpretation was provided."
-    )
-
-
-def short_ui_label(value):
-    """Short labels for summary cards; full raw labels are shown below."""
-    mapping = {
-        "POSITIVE_BUT_ENTRY_RISK": "Positive + Entry Risk",
-        "WATCHLIST_BULLISH_ENTRY_RISK": "Bullish Watchlist",
-        "BUY_WATCHLIST_OVERBOUGHT": "Buy Watchlist / High Entry Risk",
-        "WAIT_FOR_PULLBACK_OR_CONFIRMATION": "Wait for Pullback / Confirmation",
-        "MONITOR_AND_RESEARCH": "Monitor / Research",
-        "RISK_REDUCTION_REVIEW": "Review Risk Exposure",
-        "NO_ACTION_DATA_OR_RISK_BLOCK": "No Action / Risk Block",
-        "BUY_CANDIDATE": "Buy Candidate",
-        "SELL_RISK": "Sell Risk",
-        "HOLD": "Hold",
-        "NEUTRAL": "Neutral",
-        "HIGH": "High",
-        "MEDIUM": "Medium",
-        "LOW": "Low",
-        "CRITICAL": "Critical",
-        "CAUTIOUS": "Cautious",
-        "CONSERVATIVE": "Conservative",
-        "DEFENSIVE": "Defensive",
-    }
-    raw = safe_text(value)
-    return mapping.get(raw.upper(), raw.replace("_", " ").title())
-
-
-def card_tone(value):
-    v = safe_text(value).lower()
-    if any(x in v for x in ["buy", "positive", "bullish", "high"]):
-        return ("#eaf7ee", "#116329", "#b7ebc6")
-    if any(x in v for x in ["risk", "wait", "caution", "medium", "pullback", "sell"]):
-        return ("#fff7e6", "#8a5a00", "#ffe0a3")
-    if any(x in v for x in ["block", "critical", "defensive"]):
-        return ("#fff0f0", "#a30d11", "#ffc2c7")
-    return ("#f7f9fc", "#1f2937", "#d9e2ec")
-
-
-def render_readable_card(title, value, subtitle=None):
-    """A wrap-friendly replacement for st.metric, avoiding POSITIVE_B... truncation."""
-    bg, fg, border = card_tone(value)
-    value = short_ui_label(value)
-    subtitle = safe_text(subtitle, "")
-    subtitle_block = f"<div class='card-subtitle'>{subtitle}</div>" if subtitle else ""
-    st.markdown(
-        f"""
-        <div style="background:{bg}; border:1px solid {border}; border-radius:14px; padding:14px 16px; min-height:108px; margin-bottom:10px;">
-            <div style="font-size:0.82rem; color:#5b677a; margin-bottom:6px;">{title}</div>
-            <div style="font-size:1.22rem; line-height:1.25; font-weight:650; color:{fg}; white-space:normal; overflow-wrap:anywhere; word-break:break-word;">{value}</div>
-            {subtitle_block}
-        </div>
-        <style>
-        .card-subtitle {{font-size:0.80rem; color:#596579; margin-top:6px; line-height:1.25; overflow-wrap:anywhere;}}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def build_fallback_signal_result(symbol, analysis_result):
@@ -241,37 +143,12 @@ def build_fallback_risk_result(symbol, signal_result):
     }
 
 
-def get_secret_value(name, default=""):
-    """Read a value from Streamlit secrets first, then environment variables."""
-    try:
-        if hasattr(st, "secrets") and name in st.secrets:
-            return str(st.secrets[name])
-    except Exception:
-        pass
-    return os.getenv(name, default) or default
-
-
 def make_llm_agent():
     if LLMReportAgent is None:
-        st.session_state["llm_agent_init_error"] = "agents.llm_report_agent could not be imported."
         return None
-
     try:
-        load_dotenv(override=True)
-        groq_key = (
-            get_secret_value("GROQ_API_KEY")
-            or get_secret_value("GROQ_API")
-            or get_secret_value("GROQ_KEY")
-            or ""
-        )
-        groq_model = get_secret_value("GROQ_MODEL", "llama-3.1-8b-instant")
-        return LLMReportAgent(
-            groq_api_key=groq_key,
-            model=groq_model,
-            timeout=30
-        )
-    except Exception as e:
-        st.session_state["llm_agent_init_error"] = str(e)
+        return LLMReportAgent()
+    except Exception:
         return None
 
 
@@ -329,6 +206,348 @@ def is_search_like_financial_query(text: str) -> bool:
         return True
 
     return False
+
+
+def detect_financial_symbol_for_ui(text: str):
+    """
+    Lightweight ticker/company detector used only for UI routing.
+
+    The LLMReportAgent still performs its own source-grounded symbol detection,
+    but this helper prevents a stale ticker override from accidentally replacing
+    a clear symbol in the user's query, e.g. typing "AAPL news" while the
+    optional fallback field still contains MSFT.
+    """
+    text = text or ""
+
+    stop_words = {
+        "THE", "AND", "FOR", "NEWS", "THIS", "WEEK", "LAST", "YEAR",
+        "YEARS", "REPORT", "BUY", "SELL", "HOLD", "AI", "API", "USA",
+        "CEO", "EPS", "Q", "A", "AN", "OF", "TO", "IN", "ON", "ABOUT",
+        "LATEST", "RECENT", "FINANCIAL", "COMPANY", "MARKET", "UPDATE",
+        "QUERY", "FETCH", "SEARCH", "STOCK", "EARNINGS"
+    }
+
+    import re
+
+    for token in re.findall(r"\b[A-Z]{1,5}\b", text):
+        if token not in stop_words:
+            return token
+
+    lowered = text.lower()
+    company_to_ticker = {
+        "apple": "AAPL",
+        "microsoft": "MSFT",
+        "tesla": "TSLA",
+        "nvidia": "NVDA",
+        "amazon": "AMZN",
+        "google": "GOOGL",
+        "alphabet": "GOOGL",
+        "meta": "META",
+        "netflix": "NFLX",
+        "amd": "AMD",
+        "broadcom": "AVGO",
+        "walmart": "WMT",
+        "visa": "V",
+        "mastercard": "MA",
+        "costco": "COST",
+        "disney": "DIS",
+        "intel": "INTC",
+        "qualcomm": "QCOM",
+        "oracle": "ORCL",
+        "cisco": "CSCO",
+        "jpmorgan": "JPM",
+        "jp morgan": "JPM",
+        "home depot": "HD",
+        "adobe": "ADBE",
+        "pepsico": "PEP",
+        "bank of america": "BAC",
+        "unitedhealth": "UNH",
+        "united health": "UNH",
+    }
+
+    for company_name, ticker in company_to_ticker.items():
+        if company_name in lowered:
+            return ticker
+
+    return None
+
+
+def build_financial_effective_input(raw_text: str, ticker_fallback: str, source_mode: str):
+    """
+    Build the text and symbol passed to the Financial News / Report Summarizer.
+
+    Fixes stale UI state bugs:
+    1. If the text area is empty but the ticker fallback is filled, still run by
+       converting the ticker into a safe source-grounded query.
+    2. If the text area already contains a symbol/company name, do not let a stale
+       fallback ticker override it.
+    """
+    raw_text = (raw_text or "").strip()
+    ticker_fallback = (ticker_fallback or "").strip().upper()
+    mode_l = (source_mode or "auto").lower()
+
+    text_symbol = detect_financial_symbol_for_ui(raw_text)
+
+    if raw_text:
+        if text_symbol:
+            return raw_text, None, text_symbol, (
+                f"Detected {text_symbol} from the input text. The ticker fallback was not used."
+            )
+        if ticker_fallback:
+            return raw_text, ticker_fallback, ticker_fallback, (
+                f"No ticker was detected in the input text, so the ticker fallback {ticker_fallback} was used."
+            )
+        return raw_text, None, None, "No ticker fallback was used."
+
+    if ticker_fallback:
+        if mode_l == "financial":
+            effective_text = f"{ticker_fallback} financial report"
+        elif mode_l == "news":
+            effective_text = f"{ticker_fallback} news"
+        elif mode_l in ["news_and_financial", "both"]:
+            effective_text = f"{ticker_fallback} news and financial report"
+        else:
+            effective_text = f"{ticker_fallback} news and financial report"
+
+        return effective_text, ticker_fallback, ticker_fallback, (
+            f"The text box was empty, so ticker fallback {ticker_fallback} was used as a source-grounded query."
+        )
+
+    return "", None, None, "No input text or ticker fallback was provided."
+
+
+def infer_effective_financial_source_mode(input_text: str, selected_mode: str):
+    """
+    Prevent stale source-mode state from creating the wrong output.
+
+    Example: if the dropdown is still set to "financial" but the user types
+    "MSFT news", the effective mode should be "news". This keeps the UI
+    intuitive during Streamlit reruns and avoids fetching the wrong source type.
+    """
+    selected = (selected_mode or "auto").strip().lower()
+    text = (input_text or "").strip()
+    text_l = text.lower()
+
+    valid_modes = {"auto", "pasted_text", "news", "financial", "news_and_financial", "both"}
+    if selected not in valid_modes:
+        selected = "auto"
+
+    if not text:
+        return selected, f"Source mode kept as {selected} because the text box is empty."
+
+    # Concrete pasted sentences should be treated as pasted text, unless the user
+    # explicitly selected a live-source mode.
+    if has_concrete_financial_context(text) and not is_search_like_financial_query(text):
+        if selected == "auto":
+            return "pasted_text", "Detected pasted financial/news text, so source mode was set to pasted_text."
+        return selected, f"Source mode kept as {selected} for pasted text."
+
+    asks_news = any(
+        phrase in text_l
+        for phrase in [
+            "news", "headline", "headlines", "announcement", "announcements",
+            "latest", "recent", "this week", "what happened", "update"
+        ]
+    )
+    asks_financial = any(
+        phrase in text_l
+        for phrase in [
+            "financial", "financial report", "report", "earnings", "annual",
+            "quarter", "quarterly", "income statement", "revenue", "profit", "eps"
+        ]
+    )
+
+    if asks_news and asks_financial:
+        effective = "news_and_financial"
+    elif asks_news:
+        effective = "news"
+    elif asks_financial:
+        effective = "financial"
+    else:
+        effective = selected
+
+    if effective != selected:
+        return effective, (
+            f"Source mode changed from {selected} to {effective} because the input text clearly asks for {effective.replace('_', ' ')}."
+        )
+
+    return effective, f"Source mode kept as {effective}."
+
+
+# -----------------------------
+# UI helper functions
+# -----------------------------
+def safe_text(value, default="N/A"):
+    """Return a safe string for display."""
+    if value is None:
+        return default
+    text_value = str(value).strip()
+    return text_value if text_value else default
+
+
+def ui_label(value, default="N/A"):
+    """
+    Convert long internal agent labels into readable UI labels.
+    Full raw labels remain available in the decision text and JSON expanders.
+    """
+    raw = safe_text(value, default)
+    mapping = {
+        "POSITIVE_BUT_ENTRY_RISK": "Positive + entry risk",
+        "WATCHLIST_BULLISH_ENTRY_RISK": "Bullish watchlist / entry risk",
+        "BUY_WATCHLIST_OVERBOUGHT": "Buy watchlist / overbought",
+        "BUY_CANDIDATE": "Buy candidate",
+        "SELL_RISK": "Sell risk",
+        "HOLD": "Hold",
+        "NEUTRAL": "Neutral",
+        "BLOCKED": "Blocked",
+        "BLOCK_TRADE": "Block trade",
+        "KEEP_SIGNAL": "Keep signal",
+        "DOWNGRADE_TO_HOLD": "Downgrade to hold",
+        "WAIT_FOR_PULLBACK_OR_CONFIRMATION": "Wait for pullback / confirmation",
+        "MONITOR_AND_RESEARCH": "Monitor & research",
+        "RISK_REDUCTION_REVIEW": "Risk reduction review",
+        "NO_ACTION_DATA_OR_RISK_BLOCK": "No action / risk block",
+        "FURTHER_RESEARCH_ONLY": "Further research only",
+        "CONSERVATIVE": "Conservative",
+        "CAUTIOUS": "Cautious",
+        "DEFENSIVE": "Defensive",
+        "LOW": "Low",
+        "MEDIUM": "Medium",
+        "HIGH": "High",
+        "CRITICAL": "Critical",
+    }
+    if raw in mapping:
+        return mapping[raw]
+    return raw.replace("_", " ").title() if raw.isupper() else raw
+
+
+def numeric_fmt(value, digits=3, default="N/A"):
+    try:
+        if value is None:
+            return default
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return default
+
+
+def risk_tone(risk_level):
+    value = safe_text(risk_level).lower()
+    if "critical" in value or "high" in value or "defensive" in value:
+        return "danger"
+    if "medium" in value or "caution" in value or "cautious" in value:
+        return "warning"
+    if "low" in value:
+        return "success"
+    return "neutral"
+
+
+def signal_tone(signal):
+    value = safe_text(signal).lower()
+    if "buy" in value or "positive" in value or "bullish" in value:
+        return "success"
+    if "sell" in value or "risk" in value or "block" in value:
+        return "warning"
+    if "hold" in value or "monitor" in value or "neutral" in value or "wait" in value:
+        return "neutral"
+    return "neutral"
+
+
+def render_summary_card(title, value, subtitle=None, tone="neutral"):
+    """
+    Render a wrap-friendly card so long labels like WAIT_FOR_PULLBACK_OR_CONFIRMATION
+    are readable instead of being truncated by st.metric.
+    """
+    palettes = {
+        "success": ("#eaf7ee", "#116329", "#b7ebc6"),
+        "warning": ("#fff7e6", "#8a5a00", "#ffe0a3"),
+        "danger": ("#fff0f0", "#a30d11", "#ffc2c7"),
+        "neutral": ("#f7f9fc", "#1f2937", "#d9e2ec"),
+        "info": ("#eef6ff", "#064b8a", "#c9e2ff"),
+    }
+    bg, fg, border = palettes.get(tone, palettes["neutral"])
+
+    title_html = html.escape(safe_text(title))
+    value_html = html.escape(safe_text(value))
+    subtitle_text = safe_text(subtitle, "")
+    subtitle_html = html.escape(subtitle_text)
+
+    subtitle_block = ""
+    if subtitle_html:
+        subtitle_block = f"<div class='metric-subtitle'>{subtitle_html}</div>"
+
+    st.markdown(
+        f"""
+        <div class="custom-metric-card" style="
+            background:{bg};
+            border:1px solid {border};
+            border-radius:14px;
+            padding:14px 16px;
+            min-height:104px;
+            margin-bottom:10px;
+        ">
+            <div style="font-size:0.82rem; color:#5b677a; margin-bottom:6px;">{title_html}</div>
+            <div style="
+                font-size:1.35rem;
+                line-height:1.25;
+                font-weight:650;
+                color:{fg};
+                white-space:normal;
+                overflow-wrap:anywhere;
+                word-break:break-word;
+            ">{value_html}</div>
+            {subtitle_block}
+        </div>
+        <style>
+            .metric-subtitle {{
+                font-size: 0.82rem;
+                color: #596579;
+                margin-top: 6px;
+                line-height: 1.25;
+                overflow-wrap: anywhere;
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def get_signal_display(signal_result):
+    return (
+        signal_result.get("display_signal")
+        or signal_result.get("enhanced_signal")
+        or get_nested(signal_result, ["signal_for_next_agent", "display_signal"])
+        or get_nested(signal_result, ["signal_for_next_agent", "enhanced_signal"])
+        or signal_result.get("model_signal")
+        or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
+    )
+
+
+def get_risk_interpretation(risk_result):
+    return (
+        risk_result.get("risk_interpretation")
+        or risk_result.get("risk_theme")
+        or risk_result.get("risk_note")
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_interpretation"])
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_theme"])
+        or get_nested(risk_result, ["risk_for_next_agent", "risk_note"])
+        or "No additional risk interpretation was provided."
+    )
+
+
+def render_agent_status(label, result):
+    summary = result.get("summary") or result.get("agent_decision") or "No summary available."
+    if result.get("success", True):
+        st.success(f"{label}: {summary}")
+    else:
+        st.warning(f"{label}: {summary}")
+
+
+def write_list_items(items, empty_text="No items available."):
+    if not items:
+        st.write(empty_text)
+        return
+    for item in items:
+        st.write(f"- {item}")
 
 
 # -----------------------------
@@ -557,50 +776,58 @@ if run_pipeline:
             signal_result.get("model_signal")
             or get_nested(signal_result, ["signal_for_next_agent", "signal"], "Unknown")
         )
-        model_display_signal = get_signal_display(signal_result)
         risk_level = (
             risk_result.get("risk_level")
             or get_nested(risk_result, ["risk_for_next_agent", "risk_level"], "Unknown")
         )
 
-        analyst_raw_signal = analysis_result.get("analyst_signal", "Unknown")
-        analyst_display_signal = analysis_result.get("display_signal") or analyst_raw_signal
+        analyst_signal_raw = analysis_result.get("analyst_signal", "Unknown")
+        analyst_display = (
+            analysis_result.get("display_signal")
+            or analysis_result.get("analyst_signal")
+            or "Unknown"
+        )
         analyst_score = analysis_result.get("analyst_score", "N/A")
+        model_display_signal = get_signal_display(signal_result)
         strategy_action = strategy_result.get("strategy_action", "Unknown")
         strategy_level = strategy_result.get("strategy_level", "Unknown")
         risk_interpretation = get_risk_interpretation(risk_result)
         position_guidance = strategy_result.get("position_guidance", "No position guidance provided.")
         leverage_guidance = strategy_result.get("leverage_guidance", "No leverage guidance provided.")
 
-        st.caption("Readable summary cards avoid Streamlit metric truncation. Full raw labels are kept in the detail table below.")
+        st.caption(
+            "Summary cards use readable labels. Full raw labels and full agent outputs are available below."
+        )
 
-        row1 = st.columns(4)
-        with row1[0]:
-            render_readable_card("Symbol", clean_symbol)
-        with row1[1]:
-            render_readable_card("Validation", validation_result.get("confidence", "Unknown"))
-        with row1[2]:
-            render_readable_card(
-                "Analyst Signal",
-                analyst_display_signal,
-                subtitle=f"Raw: {analyst_raw_signal}; score: {numeric_fmt(analyst_score)}"
+        summary_row_1 = st.columns(4)
+        with summary_row_1[0]:
+            render_summary_card("Symbol", clean_symbol, tone="info")
+        with summary_row_1[1]:
+            render_summary_card("Validation", validation_result.get("confidence", "Unknown"), tone="success")
+        with summary_row_1[2]:
+            render_summary_card(
+                "Analyst signal",
+                ui_label(analyst_display),
+                subtitle=f"Raw: {analyst_signal_raw}; score: {numeric_fmt(analyst_score)}",
+                tone=signal_tone(analyst_display)
             )
-        with row1[3]:
-            render_readable_card(
-                "Model Signal",
-                model_signal,
-                subtitle=f"Display: {short_ui_label(model_display_signal)}"
+        with summary_row_1[3]:
+            render_summary_card(
+                "Model signal",
+                ui_label(model_signal),
+                subtitle=f"Display: {ui_label(model_display_signal)}",
+                tone=signal_tone(model_display_signal)
             )
 
-        row2 = st.columns(4)
-        with row2[0]:
-            render_readable_card("Final Signal", final_signal)
-        with row2[1]:
-            render_readable_card("Risk Level", risk_level, subtitle=risk_interpretation)
-        with row2[2]:
-            render_readable_card("Strategy", strategy_action)
-        with row2[3]:
-            render_readable_card("Strategy Level", strategy_level)
+        summary_row_2 = st.columns(4)
+        with summary_row_2[0]:
+            render_summary_card("Final signal", ui_label(final_signal), tone=signal_tone(final_signal))
+        with summary_row_2[1]:
+            render_summary_card("Risk level", ui_label(risk_level), subtitle=risk_interpretation, tone=risk_tone(risk_level))
+        with summary_row_2[2]:
+            render_summary_card("Strategy", ui_label(strategy_action), tone=signal_tone(strategy_action))
+        with summary_row_2[3]:
+            render_summary_card("Strategy level", ui_label(strategy_level), tone=risk_tone(strategy_level))
 
         st.subheader("Risk-aware Strategy Guidance")
         guidance_cols = st.columns(3)
@@ -611,18 +838,10 @@ if run_pipeline:
         with guidance_cols[2]:
             st.info(f"**Risk interpretation**\n\n{risk_interpretation}")
 
-        st.subheader("Raw Agent Labels")
-        raw_summary_df = pd.DataFrame([
-            {"Field": "Analyst raw signal", "Value": analyst_raw_signal},
-            {"Field": "Analyst display signal", "Value": analyst_display_signal},
-            {"Field": "Model raw signal", "Value": model_signal},
-            {"Field": "Model display signal", "Value": model_display_signal},
-            {"Field": "Final risk-controlled signal", "Value": final_signal},
-            {"Field": "Risk level", "Value": risk_level},
-            {"Field": "Strategy action", "Value": strategy_action},
-            {"Field": "Strategy level", "Value": strategy_level},
-        ])
-        st.dataframe(raw_summary_df, use_container_width=True, hide_index=True)
+        conditions_to_reconsider = strategy_result.get("conditions_to_reconsider", [])
+        if conditions_to_reconsider:
+            with st.expander("Conditions to reconsider this strategy", expanded=False):
+                write_list_items(conditions_to_reconsider)
 
         with st.expander("Show agent decisions and status messages", expanded=False):
             st.write(f"**Validation Decision:** {validation_result.get('agent_decision', 'N/A')}")
@@ -632,25 +851,19 @@ if run_pipeline:
             st.write(f"**Strategist Agent:** {strategy_result.get('summary', 'N/A')}")
             st.write(f"**Reward Agent:** {reward_record_result.get('summary', 'N/A')}")
             st.write(f"**Groq Report Agent:** {llm_single_stock_report.get('summary', 'N/A')}")
-
+            st.divider()
             if validation_result.get("summary"):
-                st.success(validation_result.get("summary"))
+                render_agent_status("Validation Agent", validation_result)
             if analysis_result.get("summary"):
-                st.success(analysis_result.get("summary"))
+                render_agent_status("Analyst Agent", analysis_result)
             if signal_result.get("summary"):
-                st.success(signal_result.get("summary"))
+                render_agent_status("Signal Model", signal_result)
             if risk_result.get("summary"):
-                st.success(risk_result.get("summary"))
+                render_agent_status("Risk Agent", risk_result)
             if strategy_result.get("summary"):
-                if strategy_result.get("success"):
-                    st.success(strategy_result.get("summary"))
-                else:
-                    st.warning(strategy_result.get("summary"))
+                render_agent_status("Strategist Agent", strategy_result)
             if reward_record_result.get("summary"):
-                if reward_record_result.get("success"):
-                    st.success(reward_record_result.get("summary"))
-                else:
-                    st.warning(reward_record_result.get("summary"))
+                render_agent_status("Reward Agent", reward_record_result)
 
         # -----------------------------
         # Detailed outputs
@@ -697,12 +910,7 @@ if run_pipeline:
         if llm_single_stock_report.get("llm_available"):
             st.success("Groq explanation generated successfully.")
         elif llm_single_stock_report.get("success"):
-            st.warning("Local fallback explanation was used. Groq did not return a live response.")
-            if llm_single_stock_report.get("llm_error"):
-                with st.expander("Show Groq API error / debug info"):
-                    st.code(llm_single_stock_report.get("llm_error"))
-                    if llm_single_stock_report.get("llm_debug"):
-                        st.json(llm_single_stock_report.get("llm_debug"))
+            st.success("Local fallback explanation generated successfully. Groq was unavailable, but the report was still produced safely.")
         else:
             st.error("Report Agent failed to generate an explanation.")
         st.markdown(llm_single_stock_report.get("plain_language_report", ""))
@@ -1037,12 +1245,7 @@ if st.button("Run S&P-style Screener"):
         if llm_screener_report.get("llm_available"):
             st.success("Groq screener explanation generated successfully.")
         elif llm_screener_report.get("success"):
-            st.warning("Local fallback screener explanation was used. Groq did not return a live response.")
-            if llm_screener_report.get("llm_error"):
-                with st.expander("Show Groq API error / debug info"):
-                    st.code(llm_screener_report.get("llm_error"))
-                    if llm_screener_report.get("llm_debug"):
-                        st.json(llm_screener_report.get("llm_debug"))
+            st.success("Local fallback screener explanation generated successfully. Groq was unavailable, but the screener report was still produced safely.")
         else:
             st.error("Screener Report Agent failed to generate an explanation.")
         st.markdown(llm_screener_report.get("plain_language_report", ""))
@@ -1093,10 +1296,14 @@ with financial_col_2:
             "news uses Finnhub. financial uses Alpha Vantage. news_and_financial tries both."
         )
     )
-    financial_symbol_override = st.text_input(
-        "Optional ticker override",
+    financial_symbol_fallback = st.text_input(
+        "Ticker fallback / override only when input has no ticker",
         value="",
-        placeholder="MSFT"
+        placeholder="MSFT",
+        help=(
+            "Use this when the text box is empty, or when your pasted text does not contain a clear ticker/company name. "
+            "If the text box already says 'AAPL news', the system will use AAPL and ignore this fallback to avoid stale-symbol bugs."
+        )
     )
     financial_lookback_days = st.slider(
         "News lookback days",
@@ -1125,9 +1332,23 @@ financial_question = st.text_input(
 )
 
 if st.button("Simplify / Fetch Financial Report or News"):
-    if not financial_text.strip():
-        st.warning("Please paste financial text or enter a ticker/news/report query first, such as 'MSFT news'.")
+    effective_financial_text, effective_financial_symbol, display_detected_symbol, routing_note = build_financial_effective_input(
+        raw_text=financial_text,
+        ticker_fallback=financial_symbol_fallback,
+        source_mode=financial_source_mode
+    )
+    effective_financial_source_mode, source_mode_note = infer_effective_financial_source_mode(
+        input_text=effective_financial_text,
+        selected_mode=financial_source_mode
+    )
+
+    if not effective_financial_text.strip():
+        st.warning(
+            "Please paste financial text, enter a ticker/news/report query, or fill the ticker fallback field first. "
+            "Examples: 'MSFT news', 'AAPL financial report', or a pasted earnings/news paragraph."
+        )
     else:
+        st.caption(routing_note)
         llm_report_agent = make_llm_agent()
         if llm_report_agent is None:
             st.error(
@@ -1137,17 +1358,17 @@ if st.button("Simplify / Fetch Financial Report or News"):
             with st.spinner("Report Agent is preparing a source-grounded financial/news summary..."):
                 try:
                     simplification_result = llm_report_agent.simplify_financial_text(
-                        report_text=financial_text,
+                        report_text=effective_financial_text,
                         question=financial_question,
-                        source_mode=financial_source_mode,
-                        symbol=financial_symbol_override.strip().upper() or None,
+                        source_mode=effective_financial_source_mode,
+                        symbol=effective_financial_symbol,
                         lookback_days=financial_lookback_days,
                         max_news=financial_max_news
                     )
                 except TypeError:
                     # Backward compatibility with older llm_report_agent.py versions.
                     simplification_result = llm_report_agent.simplify_financial_text(
-                        report_text=financial_text,
+                        report_text=effective_financial_text,
                         user_question=financial_question
                     )
                 except Exception as e:
@@ -1156,31 +1377,30 @@ if st.button("Simplify / Fetch Financial Report or News"):
                         "llm_available": False,
                         "plain_language_report": "Report Agent failed while simplifying the financial/news input.",
                         "summary": str(e),
-                        "error": str(e)
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
                     }
 
             if simplification_result.get("llm_available"):
                 st.success("Groq financial/news summary generated successfully.")
             elif simplification_result.get("success"):
-                st.warning(
-                    "Local fallback financial/news summary was used. Groq did not return a live response. "
-                    "The output was still produced safely from available sources."
+                st.success(
+                    "Local fallback financial/news summary generated successfully. "
+                    "Groq was unavailable, but the output was still produced safely from available sources."
                 )
-                if simplification_result.get("llm_error"):
-                    with st.expander("Show Groq API error / debug info"):
-                        st.code(simplification_result.get("llm_error"))
-                        if simplification_result.get("llm_debug"):
-                            st.json(simplification_result.get("llm_debug"))
             else:
                 st.error(simplification_result.get("summary", "Financial/news summarization failed."))
 
             meta_cols = st.columns(4)
             with meta_cols[0]:
-                st.metric("Detected Symbol", simplification_result.get("symbol") or "N/A")
+                st.metric(
+                    "Detected Symbol",
+                    simplification_result.get("symbol") or display_detected_symbol or "N/A"
+                )
             with meta_cols[1]:
                 st.metric("Source", simplification_result.get("source", "N/A"))
             with meta_cols[2]:
-                st.metric("Mode", simplification_result.get("source_mode", financial_source_mode))
+                st.metric("Mode", simplification_result.get("source_mode", effective_financial_source_mode))
             with meta_cols[3]:
                 st.metric("LLM", "Groq" if simplification_result.get("llm_available") else "Fallback")
 
@@ -1192,44 +1412,20 @@ if st.button("Simplify / Fetch Financial Report or News"):
 
             verified_news = simplification_result.get("verified_news", {}) or {}
             news_items = verified_news.get("items", []) if isinstance(verified_news, dict) else []
-            excluded_items = verified_news.get("excluded_items", []) if isinstance(verified_news, dict) else []
-            raw_count = verified_news.get("raw_count", 0) if isinstance(verified_news, dict) else 0
-            kept_count = verified_news.get("company_specific_count", len(news_items)) if isinstance(verified_news, dict) else len(news_items)
-            excluded_count = verified_news.get("excluded_count", len(excluded_items)) if isinstance(verified_news, dict) else len(excluded_items)
-
-            if isinstance(verified_news, dict) and (raw_count or kept_count or excluded_count):
-                st.caption(
-                    f"News relevance filter: scanned {raw_count} items, kept {kept_count} company-specific items, "
-                    f"excluded {excluded_count} broad/uncertain items."
-                )
-
             if news_items:
                 st.subheader("Company-Specific Retrieved News Items")
                 news_df = pd.DataFrame(news_items)
                 display_cols = [
-                    col for col in [
-                        "date", "source", "headline", "summary",
-                        "relevance_score", "relevance_reason", "url"
-                    ]
+                    col for col in ["date", "source", "headline", "summary", "relevance_score", "relevance_reason", "url"]
                     if col in news_df.columns
                 ]
                 st.dataframe(news_df[display_cols], use_container_width=True, hide_index=True)
-            elif raw_count:
-                st.warning(
-                    "No company-specific news passed the relevance filter. "
-                    "Broad or uncertain headlines were excluded from the report."
-                )
 
+            excluded_items = verified_news.get("excluded_items", []) if isinstance(verified_news, dict) else []
             if excluded_items:
                 with st.expander("Show excluded broad/uncertain news items for audit"):
                     excluded_df = pd.DataFrame(excluded_items)
-                    display_cols = [
-                        col for col in [
-                            "date", "source", "headline", "summary",
-                            "relevance_score", "relevance_reason", "url"
-                        ]
-                        if col in excluded_df.columns
-                    ]
+                    display_cols = [col for col in ["date", "source", "headline", "summary", "relevance_score", "relevance_reason", "url"] if col in excluded_df.columns]
                     st.dataframe(excluded_df[display_cols], use_container_width=True, hide_index=True)
 
             financial_snapshot = simplification_result.get("financial_snapshot", {}) or {}
