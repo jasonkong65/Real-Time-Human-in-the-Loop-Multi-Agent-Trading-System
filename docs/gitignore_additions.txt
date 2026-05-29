@@ -1,0 +1,10 @@
+# Local SQLite database / memory files
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Local generated caches
+data/cache/
+data/historical/*.parquet
+data/historical/metadata/

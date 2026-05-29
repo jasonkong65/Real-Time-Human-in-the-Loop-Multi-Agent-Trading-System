@@ -6,28 +6,29 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 class StorageAgent:
     """
-    SQLite-based persistent memory layer for the multi-agent trading system.
+    SQLite persistent memory layer for the multi-agent stock decision-support system.
 
-    Role:
-    - Store structured outputs from each agent.
-    - Store pipeline-level summaries.
-    - Store paper decisions and reward updates.
-    - Store LLM reports, screener runs, training runs, and market quote snapshots.
+    Main role:
+    - Store full pipeline runs and each agent's structured JSON output.
+    - Store market quote snapshots, paper decisions, reward updates, training metadata,
+      screener runs, and LLM reports.
+    - Provide read methods for Evaluator Agent and Streamlit dashboards.
 
     Design:
-    - Uses Python's built-in sqlite3, so no extra database server is required.
-    - Stores large nested objects as JSON text for auditability.
-    - Does not store API keys or real brokerage credentials.
+    - Uses Python's built-in sqlite3. No database server is required.
+    - Stores nested agent outputs as JSON text for auditability.
+    - Does not store API keys, broker credentials, or personal financial information.
     """
 
     def __init__(self, db_path: str = "data/trading_system.db", auto_init: bool = True):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
         if auto_init:
             self.init_db()
 
@@ -45,7 +46,20 @@ class StorageAgent:
         try:
             return json.dumps(value, ensure_ascii=False, default=str)
         except Exception:
-            return json.dumps({"serialization_error": str(value)}, ensure_ascii=False)
+            try:
+                return json.dumps({"serialization_error": repr(value)}, ensure_ascii=False)
+            except Exception:
+                return "{}"
+
+    def _from_json(self, value: Any, default=None):
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
 
     def _safe_float(self, value: Any) -> Optional[float]:
         try:
@@ -59,7 +73,7 @@ class StorageAgent:
         try:
             if value is None or value == "":
                 return None
-            return int(value)
+            return int(float(value))
         except Exception:
             return None
 
@@ -73,10 +87,16 @@ class StorageAgent:
                 return default
         return current
 
+    def _normalise_symbol(self, symbol: Any) -> str:
+        return str(symbol or "UNKNOWN").upper().strip()
+
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         try:
             yield conn
             conn.commit()
@@ -92,11 +112,25 @@ class StorageAgent:
             rows = conn.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
+    def _table_columns(self, table: str) -> List[str]:
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            return [row["name"] for row in rows]
+        except Exception:
+            return []
+
+    def _add_column_if_missing(self, table: str, column: str, column_type: str):
+        columns = self._table_columns(table)
+        if column not in columns:
+            with self._connect() as conn:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
     def init_db(self) -> Dict[str, Any]:
-        """Create tables if they do not already exist."""
+        """Create and migrate all tables."""
         schema = [
             """
             CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -172,8 +206,11 @@ class StorageAgent:
                 future_return REAL,
                 reward REAL,
                 reward_horizon_days INTEGER,
+                horizon_label TEXT,
+                status TEXT,
                 updated_at_utc TEXT,
-                raw_json TEXT
+                raw_json TEXT,
+                FOREIGN KEY(decision_id) REFERENCES paper_decisions(decision_id)
             )
             """,
             """
@@ -206,6 +243,21 @@ class StorageAgent:
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS risk_dqn_replay (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at_utc TEXT,
+                state_text TEXT,
+                state_vector_json TEXT,
+                action TEXT,
+                action_index INTEGER,
+                reward REAL,
+                next_state_text TEXT,
+                next_state_vector_json TEXT,
+                done INTEGER,
+                source TEXT DEFAULT 'risk_agent'
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS llm_reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT,
@@ -226,10 +278,17 @@ class StorageAgent:
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_pipeline_symbol_time ON pipeline_runs(symbol, created_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_agent_outputs_run ON agent_outputs(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_agent_outputs_agent ON agent_outputs(agent_name, created_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_market_quotes_symbol_time ON market_quotes(symbol, created_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_decisions(status)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_symbol_time ON paper_decisions(symbol, created_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_reward_decision ON reward_updates(decision_id)",
+            "CREATE INDEX IF NOT EXISTS idx_reward_symbol_time ON reward_updates(symbol, updated_at_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_screener_time ON screener_runs(created_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_llm_reports_run ON llm_reports(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_time ON risk_dqn_replay(created_at_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_action ON risk_dqn_replay(action)",
+
         ]
 
         with self._connect() as conn:
@@ -237,6 +296,10 @@ class StorageAgent:
                 conn.execute(statement)
             for statement in indexes:
                 conn.execute(statement)
+
+        # Safe migrations for users with an older db.
+        self._add_column_if_missing("reward_updates", "horizon_label", "TEXT")
+        self._add_column_if_missing("reward_updates", "status", "TEXT")
 
         return {
             "success": True,
@@ -266,8 +329,31 @@ class StorageAgent:
         reward_record_result = reward_record_result or {}
 
         run_id = run_id or self._new_id("run")
-        symbol = (symbol or "UNKNOWN").upper().strip()
-        selected_price = self._safe_float(validation_result.get("selected_price"))
+        symbol = self._normalise_symbol(symbol)
+
+        selected_price = (
+            self._safe_float(validation_result.get("selected_price"))
+            or self._safe_float(self._get_nested(validation_result, ["validation_for_next_agent", "selected_price"]))
+        )
+
+        analyst_signal = (
+            analysis_result.get("analyst_signal")
+            or analysis_result.get("display_signal")
+            or self._get_nested(analysis_result, ["analysis_for_next_agent", "analyst_signal"])
+        )
+
+        model_signal = (
+            signal_result.get("model_signal")
+            or signal_result.get("signal")
+            or signal_result.get("display_signal")
+            or self._get_nested(signal_result, ["signal_for_next_agent", "signal"])
+        )
+
+        model_confidence = (
+            signal_result.get("confidence_level")
+            or signal_result.get("model_confidence_level")
+            or self._get_nested(signal_result, ["signal_for_next_agent", "confidence_level"])
+        )
 
         values = (
             run_id,
@@ -275,14 +361,14 @@ class StorageAgent:
             selected_price,
             validation_result.get("confidence"),
             validation_result.get("next_action"),
-            analysis_result.get("analyst_signal") or analysis_result.get("display_signal"),
-            signal_result.get("model_signal") or signal_result.get("signal"),
-            signal_result.get("confidence_level") or signal_result.get("model_confidence_level"),
-            risk_result.get("final_signal"),
-            risk_result.get("risk_level"),
-            risk_result.get("risk_action"),
-            strategy_result.get("strategy_action"),
-            strategy_result.get("strategy_level"),
+            analyst_signal,
+            model_signal,
+            model_confidence,
+            risk_result.get("final_signal") or self._get_nested(risk_result, ["risk_for_next_agent", "final_signal"]),
+            risk_result.get("risk_level") or self._get_nested(risk_result, ["risk_for_next_agent", "risk_level"]),
+            risk_result.get("risk_action") or self._get_nested(risk_result, ["risk_for_next_agent", "risk_action"]),
+            strategy_result.get("strategy_action") or self._get_nested(strategy_result, ["strategy_for_next_agent", "strategy_action"]),
+            strategy_result.get("strategy_level") or self._get_nested(strategy_result, ["strategy_for_next_agent", "strategy_level"]),
             reward_record_result.get("decision_id"),
             self._now_utc(),
         )
@@ -315,19 +401,35 @@ class StorageAgent:
             """,
             (
                 run_id,
-                (symbol or "UNKNOWN").upper().strip(),
+                self._normalise_symbol(symbol),
                 agent_name,
                 self._to_json(output or {}),
                 self._now_utc(),
             ),
         )
-
         return {"success": True, "summary": f"Stored {agent_name} output."}
 
-    def record_market_quotes(self, run_id: str, symbol: str, multi_quote: Dict[str, Any]) -> Dict[str, Any]:
-        multi_quote = multi_quote or {}
-        symbol = (symbol or multi_quote.get("symbol") or "UNKNOWN").upper().strip()
+    def record_market_quotes(
+        self,
+        run_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        multi_quote: Optional[Dict[str, Any]] = None,
+        quote_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Store market quote snapshots.
+
+        Compatible call styles:
+        - record_market_quotes(run_id, symbol, multi_quote)
+        - record_market_quotes(symbol="AAPL", quote_result=quote)
+        - record_market_quotes(multi_quote=multi_quote)
+        """
+        multi_quote = multi_quote or quote_result or {}
+        symbol = self._normalise_symbol(symbol or multi_quote.get("symbol"))
         inserted = 0
+
+        if not isinstance(multi_quote, dict):
+            return {"success": False, "inserted": 0, "summary": "Invalid quote payload."}
 
         source_map = {
             "finnhub": multi_quote.get("finnhub") or multi_quote.get("finnhub_quote"),
@@ -336,13 +438,22 @@ class StorageAgent:
             "secondary": multi_quote.get("secondary"),
         }
 
-        seen = set()
+        # If a single quote was passed directly.
+        if any(k in multi_quote for k in ["current_price", "price", "c"]):
+            source_map = {multi_quote.get("source") or "quote": multi_quote}
+
+        seen_signatures = set()
         for source_name, quote in source_map.items():
-            if not isinstance(quote, dict) or id(quote) in seen:
+            if not isinstance(quote, dict) or not quote:
                 continue
-            seen.add(id(quote))
-            if not quote:
+
+            quote_source = str(quote.get("source") or source_name)
+            quote_price = self._safe_float(quote.get("current_price") or quote.get("price") or quote.get("c"))
+            signature = (quote_source, quote_price, str(quote.get("timestamp") or quote.get("latest_trading_day") or ""))
+
+            if signature in seen_signatures:
                 continue
+            seen_signatures.add(signature)
 
             self._execute(
                 """
@@ -355,24 +466,28 @@ class StorageAgent:
                 (
                     run_id,
                     symbol,
-                    quote.get("source") or source_name,
-                    self._safe_float(quote.get("current_price") or quote.get("price") or quote.get("c")),
+                    quote_source,
+                    quote_price,
                     self._safe_float(quote.get("open_price") or quote.get("open") or quote.get("o")),
                     self._safe_float(quote.get("high_price") or quote.get("high") or quote.get("h")),
                     self._safe_float(quote.get("low_price") or quote.get("low") or quote.get("l")),
                     self._safe_float(quote.get("previous_close_price") or quote.get("previous_close") or quote.get("pc")),
-                    str(quote.get("timestamp") or quote.get("latest_trading_day") or ""),
+                    str(quote.get("timestamp") or quote.get("latest_trading_day") or quote.get("quote_timestamp") or ""),
                     self._now_utc(),
                     self._to_json(quote),
                 ),
             )
             inserted += 1
 
-        return {"success": True, "inserted": inserted, "summary": f"Stored {inserted} market quote snapshots."}
+        return {
+            "success": True,
+            "inserted": inserted,
+            "summary": f"Stored {inserted} market quote snapshots."
+        }
 
     def record_paper_decision(
         self,
-        run_id: str,
+        run_id: Optional[str],
         symbol: str,
         reward_record_result: Dict[str, Any],
         risk_result: Optional[Dict[str, Any]] = None,
@@ -382,11 +497,17 @@ class StorageAgent:
         risk_result = risk_result or {}
         strategy_result = strategy_result or {}
 
-        if not reward_record_result.get("success"):
+        if not reward_record_result.get("success") and not reward_record_result.get("decision_id"):
             return {"success": False, "summary": "No successful paper decision to store."}
 
         decision_id = reward_record_result.get("decision_id") or self._new_id("decision")
-        symbol = (symbol or reward_record_result.get("symbol") or "UNKNOWN").upper().strip()
+        symbol = self._normalise_symbol(symbol or reward_record_result.get("symbol"))
+
+        status = (
+            reward_record_result.get("paper_status")
+            or reward_record_result.get("status")
+            or "PAPER_PENDING"
+        )
 
         self._execute(
             """
@@ -400,55 +521,96 @@ class StorageAgent:
                 decision_id,
                 run_id,
                 symbol,
-                self._safe_float(reward_record_result.get("entry_price")),
+                self._safe_float(reward_record_result.get("entry_price") or reward_record_result.get("selected_price")),
                 reward_record_result.get("final_signal") or risk_result.get("final_signal"),
                 reward_record_result.get("risk_action") or risk_result.get("risk_action"),
-                risk_result.get("risk_level"),
-                strategy_result.get("strategy_action"),
-                "pending",
-                self._now_utc(),
+                reward_record_result.get("risk_level") or risk_result.get("risk_level"),
+                reward_record_result.get("strategy_action") or strategy_result.get("strategy_action"),
+                status,
+                reward_record_result.get("created_at_utc") or self._now_utc(),
                 self._now_utc(),
                 self._to_json(reward_record_result),
             ),
         )
 
-        return {"success": True, "decision_id": decision_id, "summary": f"Stored paper decision {decision_id}."}
+        return {
+            "success": True,
+            "decision_id": decision_id,
+            "summary": f"Stored paper decision {decision_id}."
+        }
 
     def record_reward_updates(self, auto_reward_update_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Store delayed reward updates.
+
+        Compatible with both older updates list and newer multi-horizon update formats.
+        """
         auto_reward_update_result = auto_reward_update_result or {}
-        updates = auto_reward_update_result.get("updates", []) or []
+        updates = auto_reward_update_result.get("updates", []) or auto_reward_update_result.get("reward_updates", []) or []
         inserted = 0
 
         for item in updates:
-            if not isinstance(item, dict) or not item.get("updated"):
+            if not isinstance(item, dict):
                 continue
+
+            updated = item.get("updated", True)
+            status = item.get("status") or ("COMPLETED" if updated else "PENDING")
+
+            if status.upper() in ["PENDING", "NOT_DUE"] and not item.get("future_return"):
+                continue
+
+            decision_id = item.get("decision_id") or item.get("paper_decision_id")
+            symbol = self._normalise_symbol(item.get("symbol"))
+
             self._execute(
                 """
                 INSERT INTO reward_updates (
                     decision_id, symbol, entry_price, latest_close,
-                    future_return, reward, reward_horizon_days, updated_at_utc, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    future_return, reward, reward_horizon_days,
+                    horizon_label, status, updated_at_utc, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item.get("decision_id"),
-                    (item.get("symbol") or "UNKNOWN").upper(),
+                    decision_id,
+                    symbol,
                     self._safe_float(item.get("entry_price")),
-                    self._safe_float(item.get("latest_close")),
+                    self._safe_float(item.get("latest_close") or item.get("close_price")),
                     self._safe_float(item.get("future_return")),
                     self._safe_float(item.get("reward")),
-                    None,
-                    self._now_utc(),
+                    self._safe_int(item.get("reward_horizon_days") or item.get("horizon_days")),
+                    item.get("horizon_label") or item.get("reward_horizon") or item.get("horizon"),
+                    status,
+                    item.get("updated_at_utc") or self._now_utc(),
                     self._to_json(item),
                 ),
             )
             inserted += 1
 
-        return {"success": True, "inserted": inserted, "summary": f"Stored {inserted} reward updates."}
+            # Keep the parent paper decision status updated if possible.
+            if decision_id:
+                self._execute(
+                    """
+                    UPDATE paper_decisions
+                    SET updated_at_utc = ?, status =
+                        CASE
+                            WHEN status LIKE 'COMPLETED%' THEN status
+                            ELSE 'PARTIALLY_COMPLETED'
+                        END
+                    WHERE decision_id = ?
+                    """,
+                    (self._now_utc(), decision_id),
+                )
 
-    def record_training_run(self, run_id: str, symbol: str, training_result: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "inserted": inserted,
+            "summary": f"Stored {inserted} reward updates."
+        }
+
+    def record_training_run(self, run_id: Optional[str], symbol: str, training_result: Dict[str, Any]) -> Dict[str, Any]:
         training_result = training_result or {}
         metrics = training_result.get("metrics", {}) if isinstance(training_result.get("metrics"), dict) else {}
-        best_params = training_result.get("best_params") or training_result.get("model_params") or {}
+        best_params = training_result.get("best_params") or training_result.get("model_params") or training_result.get("best_model_params") or {}
 
         self._execute(
             """
@@ -460,13 +622,13 @@ class StorageAgent:
             """,
             (
                 run_id,
-                (symbol or "UNKNOWN").upper(),
-                training_result.get("model_type") or training_result.get("model_name") or "unknown",
+                self._normalise_symbol(symbol),
+                training_result.get("model_type") or training_result.get("model_name") or training_result.get("best_model_name") or "unknown",
                 self._to_json(best_params),
                 self._safe_float(training_result.get("accuracy") or metrics.get("accuracy") or training_result.get("test_accuracy")),
                 self._safe_float(training_result.get("balanced_accuracy") or metrics.get("balanced_accuracy")),
                 self._safe_float(training_result.get("macro_f1") or metrics.get("macro_f1")),
-                self._safe_int(training_result.get("training_samples") or training_result.get("num_samples")),
+                self._safe_int(training_result.get("training_samples") or training_result.get("num_samples") or training_result.get("sample_count")),
                 training_result.get("model_path") or training_result.get("saved_model_path"),
                 training_result.get("metadata_path"),
                 self._now_utc(),
@@ -475,7 +637,7 @@ class StorageAgent:
         )
         return {"success": True, "summary": "Stored training run metadata."}
 
-    def record_llm_report(self, run_id: str, symbol: str, report_result: Dict[str, Any]) -> Dict[str, Any]:
+    def record_llm_report(self, run_id: Optional[str], symbol: str, report_result: Dict[str, Any]) -> Dict[str, Any]:
         report_result = report_result or {}
         self._execute(
             """
@@ -486,7 +648,7 @@ class StorageAgent:
             """,
             (
                 run_id,
-                (symbol or report_result.get("symbol") or "UNKNOWN").upper(),
+                self._normalise_symbol(symbol or report_result.get("symbol")),
                 report_result.get("report_type"),
                 report_result.get("provider"),
                 report_result.get("model"),
@@ -507,7 +669,18 @@ class StorageAgent:
         period: Optional[str] = None,
     ) -> Dict[str, Any]:
         screener_result = screener_result or {}
-        run_id = run_id or self._new_id("screener")
+        run_id = run_id or screener_result.get("run_id") or self._new_id("screener")
+
+        inferred_top_n = top_n
+        if inferred_top_n is None:
+            inferred_top_n = (
+                len(screener_result.get("top_buy_candidates", []) or [])
+                or len(screener_result.get("top_candidates", []) or [])
+                or None
+            )
+
+        inferred_period = period or screener_result.get("period") or screener_result.get("lookback_period")
+
         self._execute(
             """
             INSERT INTO screener_runs (run_id, universe_size, top_n, period, result_json, created_at_utc)
@@ -515,14 +688,19 @@ class StorageAgent:
             """,
             (
                 run_id,
-                self._safe_int(screener_result.get("universe_size")),
-                top_n,
-                period,
+                self._safe_int(screener_result.get("universe_size") or screener_result.get("scanned_count")),
+                self._safe_int(inferred_top_n),
+                inferred_period,
                 self._to_json(screener_result),
                 self._now_utc(),
             ),
         )
-        return {"success": True, "run_id": run_id, "summary": "Stored screener run."}
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "summary": "Stored screener run."
+        }
 
     def record_pipeline_bundle(
         self,
@@ -570,11 +748,11 @@ class StorageAgent:
                 self.record_agent_output(run_id, symbol, agent_name, output)
                 stored_agents += 1
 
-        quote_result = self.record_market_quotes(run_id, symbol, multi_quote or {})
+        quote_result = self.record_market_quotes(run_id=run_id, symbol=symbol, multi_quote=multi_quote or {})
         paper_result = self.record_paper_decision(
-            run_id,
-            symbol,
-            reward_record_result or {},
+            run_id=run_id,
+            symbol=symbol,
+            reward_record_result=reward_record_result or {},
             risk_result=risk_result,
             strategy_result=strategy_result,
         )
@@ -611,8 +789,8 @@ class StorageAgent:
             (limit,),
         )
 
-    def get_agent_outputs_for_run(self, run_id: str) -> List[Dict[str, Any]]:
-        return self._query(
+    def get_agent_outputs_for_run(self, run_id: str, parse_json: bool = False) -> List[Dict[str, Any]]:
+        rows = self._query(
             """
             SELECT * FROM agent_outputs
             WHERE run_id = ?
@@ -620,6 +798,285 @@ class StorageAgent:
             """,
             (run_id,),
         )
+
+        if parse_json:
+            for row in rows:
+                row["output"] = self._from_json(row.get("output_json"), default={})
+        return rows
+
+    def get_recent_agent_outputs(
+        self,
+        limit: int = 50,
+        agent_name: Optional[str] = None,
+        symbol: Optional[str] = None,
+        parse_json: bool = False,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+
+        if agent_name:
+            clauses.append("agent_name = ?")
+            params.append(agent_name)
+
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(self._normalise_symbol(symbol))
+
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+        rows = self._query(
+            f"""
+            SELECT * FROM agent_outputs
+            {where_sql}
+            ORDER BY created_at_utc DESC, id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+
+        if parse_json:
+            for row in rows:
+                row["output"] = self._from_json(row.get("output_json"), default={})
+        return rows
+
+    def get_latest_agent_output(
+        self,
+        agent_name: str,
+        symbol: Optional[str] = None,
+        parse_json: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self.get_recent_agent_outputs(
+            limit=1,
+            agent_name=agent_name,
+            symbol=symbol,
+            parse_json=parse_json,
+        )
+        return rows[0] if rows else None
+
+    def get_recent_screener_runs(self, limit: int = 10, parse_json: bool = False) -> List[Dict[str, Any]]:
+        rows = self._query(
+            """
+            SELECT * FROM screener_runs
+            ORDER BY created_at_utc DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+        if parse_json:
+            for row in rows:
+                row["result"] = self._from_json(row.get("result_json"), default={})
+        return rows
+
+    def get_paper_decisions(
+        self,
+        status: Optional[str] = None,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(self._normalise_symbol(symbol))
+
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+        return self._query(
+            f"""
+            SELECT * FROM paper_decisions
+            {where_sql}
+            ORDER BY created_at_utc DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+
+    def get_reward_updates(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        clauses = []
+        params: List[Any] = []
+
+        if symbol:
+            clauses.append("ru.symbol = ?")
+            params.append(self._normalise_symbol(symbol))
+
+        where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+        return self._query(
+            f"""
+            SELECT
+                ru.*,
+                pd.final_signal,
+                pd.risk_action,
+                pd.risk_level,
+                pd.strategy_action,
+                pd.status AS decision_status
+            FROM reward_updates ru
+            LEFT JOIN paper_decisions pd ON ru.decision_id = pd.decision_id
+            {where_sql}
+            ORDER BY ru.updated_at_utc DESC, ru.id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+
+    def _directional_win(self, row: Dict[str, Any]) -> Optional[int]:
+        future_return = self._safe_float(row.get("future_return"))
+        final_signal = str(row.get("final_signal") or "").upper()
+
+        if future_return is None:
+            return None
+
+        if final_signal in ["BUY_CANDIDATE", "BUY_WATCHLIST_OVERBOUGHT"]:
+            return 1 if future_return > 0 else 0
+
+        if final_signal == "SELL_RISK":
+            return 1 if future_return < 0 else 0
+
+        if final_signal == "HOLD":
+            return 1 if abs(future_return) <= 0.02 else 0
+
+        if final_signal == "BLOCKED":
+            return 1 if future_return < 0 else 0
+
+        return None
+
+    def get_reward_summary(self) -> Dict[str, Any]:
+        rows = self.get_reward_updates(limit=100000)
+        rewards = [self._safe_float(r.get("reward")) for r in rows]
+        returns = [self._safe_float(r.get("future_return")) for r in rows]
+        rewards = [r for r in rewards if r is not None]
+        returns = [r for r in returns if r is not None]
+
+        reward_wins = [1 if r > 0 else 0 for r in rewards]
+        directional = [self._directional_win(row) for row in rows]
+        directional = [v for v in directional if v is not None]
+
+        open_decisions = self._query(
+            """
+            SELECT COUNT(*) AS n FROM paper_decisions
+            WHERE status NOT LIKE 'COMPLETED%'
+            """
+        )[0]["n"]
+
+        return {
+            "success": True,
+            "completed_rewards": len(rewards),
+            "open_paper_decisions": open_decisions,
+            "average_reward": sum(rewards) / len(rewards) if rewards else None,
+            "average_future_return": sum(returns) / len(returns) if returns else None,
+            "reward_win_rate": sum(reward_wins) / len(reward_wins) if reward_wins else None,
+            "directional_win_rate": sum(directional) / len(directional) if directional else None,
+        }
+
+    def _group_reward_stats(self, group_field: str) -> List[Dict[str, Any]]:
+        allowed = {
+            "strategy_action": "pd.strategy_action",
+            "final_signal": "pd.final_signal",
+            "risk_action": "pd.risk_action",
+            "risk_level": "pd.risk_level",
+            "symbol": "ru.symbol",
+            "horizon_label": "ru.horizon_label",
+        }
+
+        if group_field not in allowed:
+            raise ValueError(f"Unsupported group field: {group_field}")
+
+        col = allowed[group_field]
+
+        return self._query(
+            f"""
+            SELECT
+                {col} AS group_name,
+                COUNT(*) AS count,
+                AVG(ru.reward) AS avg_reward,
+                AVG(ru.future_return) AS avg_future_return,
+                SUM(CASE WHEN ru.reward > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS reward_win_rate
+            FROM reward_updates ru
+            LEFT JOIN paper_decisions pd ON ru.decision_id = pd.decision_id
+            WHERE ru.reward IS NOT NULL
+            GROUP BY {col}
+            ORDER BY count DESC, avg_reward DESC
+            """
+        )
+
+    def get_reward_by_strategy_action(self) -> List[Dict[str, Any]]:
+        return self._group_reward_stats("strategy_action")
+
+    def get_reward_by_signal_type(self) -> List[Dict[str, Any]]:
+        return self._group_reward_stats("final_signal")
+
+    def get_reward_by_horizon(self) -> List[Dict[str, Any]]:
+        return self._group_reward_stats("horizon_label")
+
+    def record_dqn_replay_transition(self, transition: Dict[str, Any]) -> Dict[str, Any]:
+        """Store one DQN replay transition in SQLite."""
+        transition = transition or {}
+        try:
+            self._execute(
+                """
+                INSERT INTO risk_dqn_replay (
+                    created_at_utc, state_text, state_vector_json,
+                    action, action_index, reward, next_state_text,
+                    next_state_vector_json, done, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transition.get("created_at_utc") or self._now_utc(),
+                    transition.get("state_text"),
+                    transition.get("state_vector_json") or self._to_json(transition.get("state_vector")),
+                    transition.get("action"),
+                    self._safe_int(transition.get("action_index")),
+                    self._safe_float(transition.get("reward")),
+                    transition.get("next_state_text"),
+                    transition.get("next_state_vector_json") or self._to_json(transition.get("next_state_vector")),
+                    1 if transition.get("done", True) else 0,
+                    transition.get("source") or "risk_agent",
+                ),
+            )
+            return {"success": True, "summary": "Stored DQN replay transition."}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "summary": "Could not store DQN replay transition."}
+
+    def get_dqn_replay_memory(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        return self._query(
+            """
+            SELECT * FROM risk_dqn_replay
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+
+    def get_evaluator_dataset(self, limit: int = 10000) -> Dict[str, Any]:
+        """
+        Main method for EvaluatorAgent.
+        Returns data from SQLite in a single structured payload.
+        """
+        return {
+            "success": True,
+            "source": "sqlite",
+            "db_path": str(self.db_path),
+            "recent_pipeline_runs": self.get_recent_pipeline_runs(limit=50),
+            "paper_decisions": self.get_paper_decisions(limit=limit),
+            "reward_updates": self.get_reward_updates(limit=limit),
+            "reward_summary": self.get_reward_summary(),
+            "reward_by_strategy_action": self.get_reward_by_strategy_action(),
+            "reward_by_signal_type": self.get_reward_by_signal_type(),
+            "reward_by_horizon": self.get_reward_by_horizon(),
+            "recent_screener_runs": self.get_recent_screener_runs(limit=20),
+            "dqn_replay_memory": self.get_dqn_replay_memory(limit=limit),
+            "storage_summary": self.get_storage_summary(),
+        }
 
     def get_storage_summary(self) -> Dict[str, Any]:
         tables = [
@@ -631,12 +1088,25 @@ class StorageAgent:
             "training_runs",
             "screener_runs",
             "llm_reports",
+            "risk_dqn_replay",
         ]
+
         summary = {"db_path": str(self.db_path), "tables": {}}
         with self._connect() as conn:
             for table in tables:
-                count = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                try:
+                    count = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                except Exception:
+                    count = 0
                 summary["tables"][table] = count
+
+        reward_summary = self.get_reward_summary()
+        summary["reward_summary"] = {
+            "completed_rewards": reward_summary.get("completed_rewards"),
+            "open_paper_decisions": reward_summary.get("open_paper_decisions"),
+            "average_reward": reward_summary.get("average_reward"),
+            "reward_win_rate": reward_summary.get("reward_win_rate"),
+        }
         summary["success"] = True
         summary["summary"] = "Storage summary loaded."
         return summary

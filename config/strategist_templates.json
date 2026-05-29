@@ -1,0 +1,62 @@
+{
+  "messages": {
+    "NO_ACTION_DATA_OR_RISK_BLOCK": {
+      "position_guidance": "Do not make a paper decision from this result. Wait for better data or lower risk.",
+      "leverage_guidance": "Do not use leverage. The data or risk gate is blocking this setup.",
+      "watchlist_status": "No action"
+    },
+    "RISK_REDUCTION_REVIEW": {
+      "position_guidance": "Review downside risk. If this is already in a paper portfolio, check position size and stop-loss assumptions before adding exposure.",
+      "leverage_guidance": "Do not use leverage. The risk layer is defensive.",
+      "watchlist_status": "High caution watchlist"
+    },
+    "WAIT_FOR_PULLBACK_OR_CONFIRMATION": {
+      "position_guidance": "The setup looks positive, but entry timing risk is elevated. Wait for a pullback, cooler RSI, or stronger confirmation before any paper entry.",
+      "leverage_guidance": "Do not use leverage. The setup still has timing risk.",
+      "watchlist_status": "Bullish watchlist with entry risk"
+    },
+    "WAIT_FOR_CONFIRMATION": {
+      "position_guidance": "Keep it on the watchlist. Wait for stronger confirmation before treating it as a paper-entry candidate.",
+      "leverage_guidance": "Do not use leverage. Confirmation is not strong enough yet.",
+      "watchlist_status": "Watchlist for confirmation"
+    },
+    "RESEARCH_FOR_POSSIBLE_ENTRY": {
+      "position_guidance": "This can be researched as a possible paper-entry candidate. Check valuation, news, and portfolio exposure first.",
+      "leverage_guidance": "No leverage is assumed in this prototype. Keep the decision as paper research only.",
+      "watchlist_status": "Candidate for further research"
+    },
+    "MONITOR_POSITIVE_SETUP": {
+      "position_guidance": "Monitor the positive setup. It is not a direct entry signal yet.",
+      "leverage_guidance": "Do not use leverage. The signal is still in monitor mode.",
+      "watchlist_status": "Positive monitor list"
+    },
+    "MONITOR_AND_RESEARCH": {
+      "position_guidance": "Maintain a monitoring stance and collect more evidence before making a paper decision.",
+      "leverage_guidance": "Do not use leverage. The setup is not strong enough for a paper-entry signal.",
+      "watchlist_status": "Monitor list"
+    }
+  },
+  "checklist": {
+    "base": [
+      "Check the latest company news.",
+      "Check valuation and earnings context.",
+      "Re-run the pipeline after the next market data refresh."
+    ],
+    "entry_risk": [
+      "Check whether RSI or entry-risk level has cooled down.",
+      "Check whether price has pulled back toward a short-term moving average."
+    ],
+    "event": [
+      "Check the next earnings date before making any paper decision.",
+      "Avoid over-interpreting signals immediately before major company events."
+    ],
+    "portfolio": [
+      "Check current paper exposure before adding more risk.",
+      "Check whether the position is already too large for the paper portfolio."
+    ],
+    "risk": [
+      "Check why the Risk Agent raised caution.",
+      "Wait until risk level improves before increasing paper exposure."
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "thresholds": {
+    "high_confidence_price_diff": 0.01,
+    "medium_confidence_price_diff": 0.03,
+    "large_difference_price_diff": 0.08,
+    "stale_date_threshold_days": 3
+  },
+  "dynamic_thresholds": {
+    "enabled": true,
+    "medium_intraday_range": 0.025,
+    "high_intraday_range": 0.04,
+    "medium_range_multiplier": 1.25,
+    "high_range_multiplier": 1.5
+  },
+  "source_reliability": {
+    "finnhub": 0.95,
+    "alpha_vantage": 0.75,
+    "yfinance": 0.8,
+    "default_primary": 0.85,
+    "default_secondary": 0.65
+  },
+  "penalties": {
+    "alpha_vantage_delayed_quote_penalty": 0.15,
+    "date_gap_penalty_per_day": 0.06,
+    "max_date_gap_penalty": 0.35,
+    "single_secondary_source_penalty": 0.15,
+    "large_price_difference_penalty": 0.2
+  },
+  "actions": {
+    "allow": "ALLOW_ANALYSIS",
+    "caution": "ALLOW_ANALYSIS_WITH_CAUTION",
+    "low_confidence": "ALLOW_ANALYSIS_WITH_LOW_CONFIDENCE",
+    "block": "BLOCK_ANALYSIS"
+  }
+}

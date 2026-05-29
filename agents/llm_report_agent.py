@@ -1,8 +1,8 @@
 import os
 import re
-import time
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+import json
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -17,21 +17,85 @@ except Exception:
 
 class LLMReportAgent:
     """
-    Groq Report Agent
+    Groq Report Agent for the multi-agent stock research prototype.
 
-    Uses Groq only as an explanation layer. It does not override the decisions
-    made by the Analyst, Training, Risk, or Strategist agents.
+    Roles:
+    - Explain structured single-stock agent outputs in simple, safe language.
+    - Explain watchlist screener outputs.
+    - Summarise pasted financial/news text or fetch source-grounded company news / financial snapshots.
+
+    Safety design:
+    - Groq is an explanation layer only; it does not override Risk Agent or Strategist Agent.
+    - Prompts and post-processing avoid direct buy/sell wording.
+    - Financial/news summaries use only pasted text or verified API context.
     """
 
     COMPANY_TERMS = {
         "AAPL": ["apple", "aapl", "iphone", "ipad", "mac", "ios", "app store", "vision pro"],
-        "MSFT": ["microsoft", "msft", "azure", "windows", "copilot", "openai", "office", "xbox"],
-        "NVDA": ["nvidia", "nvda", "gpu", "cuda", "blackwell", "ai chip"],
-        "TSLA": ["tesla", "tsla", "ev", "model y", "model 3", "elon musk"],
-        "GOOGL": ["alphabet", "google", "googl", "gemini", "youtube", "search"],
-        "META": ["meta", "facebook", "instagram", "whatsapp", "metaverse"],
+        "MSFT": ["microsoft", "msft", "azure", "windows", "copilot", "openai", "office", "xbox", "linkedin", "github"],
+        "NVDA": ["nvidia", "nvda", "gpu", "cuda", "blackwell", "ai chip", "data center"],
+        "TSLA": ["tesla", "tsla", "ev", "model y", "model 3", "elon musk", "cybertruck"],
+        "GOOGL": ["alphabet", "google", "googl", "googl", "gemini", "youtube", "search", "waymo"],
+        "META": ["meta", "facebook", "instagram", "whatsapp", "metaverse", "threads"],
         "AMZN": ["amazon", "amzn", "aws", "prime", "e-commerce"],
+        "AMD": ["amd", "advanced micro devices", "ryzen", "epyc"],
+        "AVGO": ["broadcom", "avgo", "vmware"],
+        "NFLX": ["netflix", "nflx", "streaming"],
+        "JPM": ["jpmorgan", "jp morgan", "jpm"],
+        "V": ["visa", "visa inc"],
+        "MA": ["mastercard"],
+        "WMT": ["walmart", "wmt"],
+        "DIS": ["disney", "dis"],
+        "INTC": ["intel", "intc"],
+        "QCOM": ["qualcomm", "qcom"],
+        "CSCO": ["cisco", "csco"],
+        "ORCL": ["oracle", "orcl"],
     }
+
+    COMPANY_TO_TICKER = {
+        "apple": "AAPL",
+        "microsoft": "MSFT",
+        "nvidia": "NVDA",
+        "tesla": "TSLA",
+        "google": "GOOGL",
+        "alphabet": "GOOGL",
+        "meta": "META",
+        "facebook": "META",
+        "amazon": "AMZN",
+        "amd": "AMD",
+        "broadcom": "AVGO",
+        "netflix": "NFLX",
+        "jpmorgan": "JPM",
+        "jp morgan": "JPM",
+        "visa": "V",
+        "mastercard": "MA",
+        "walmart": "WMT",
+        "disney": "DIS",
+        "intel": "INTC",
+        "qualcomm": "QCOM",
+        "cisco": "CSCO",
+        "oracle": "ORCL",
+    }
+
+    TICKER_STOP_WORDS = {
+        "THE", "AND", "FOR", "NEWS", "THIS", "WEEK", "LAST", "YEAR", "YEARS",
+        "REPORT", "BUY", "SELL", "HOLD", "AI", "API", "USA", "CEO", "EPS", "Q",
+        "A", "AN", "OF", "TO", "IN", "ON", "ABOUT", "LATEST", "RECENT", "FINANCIAL",
+        "COMPANY", "MARKET", "ETF", "DOW", "CEO", "CFO", "SEC"
+    }
+
+    POSITIVE_TERMS = [
+        "beat", "beats", "growth", "strong", "record", "raise", "raised", "upgrade", "upgraded",
+        "surge", "surged", "higher revenue", "profit rises", "partnership", "launch", "approval",
+        "outperform", "demand", "contract", "win", "wins", "expansion"
+    ]
+
+    RISK_TERMS = [
+        "miss", "misses", "decline", "declined", "falls", "fell", "drop", "weak", "weaker",
+        "warning", "warned", "lawsuit", "probe", "investigation", "antitrust", "regulation",
+        "regulatory", "tariff", "layoffs", "cut", "cuts", "downgrade", "downgraded", "loss",
+        "slump", "pressure", "cost", "spending", "margin pressure", "risk", "breach"
+    ]
 
     def __init__(self, model: str = "llama-3.1-8b-instant", temperature: float = 0.2, max_tokens: int = 900):
         self.model = os.getenv("GROQ_MODEL", model)
@@ -39,7 +103,11 @@ class LLMReportAgent:
         self.max_tokens = max_tokens
         self.api_key = (os.getenv("GROQ_API_KEY") or "").strip()
         self.finnhub_key = (os.getenv("FINNHUB_API_KEY") or "").strip()
-        self.alpha_vantage_key = (os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
+        self.alpha_vantage_key = (
+            os.getenv("ALPHA_VANTAGE_API_KEY")
+            or os.getenv("ALPHAVANTAGE_API_KEY")
+            or ""
+        ).strip()
         self.client = None
         if Groq is not None and self.api_key:
             try:
@@ -53,13 +121,14 @@ class LLMReportAgent:
     def _is_available(self) -> bool:
         return self.client is not None
 
-    def _safe_float(self, value: Any, default: Optional[float] = None) -> Optional[float]:
+    def _safe_json(self, data: Any, max_chars: int = 9000) -> str:
         try:
-            if value is None or value == "":
-                return default
-            return float(value)
+            text = json.dumps(data, indent=2, ensure_ascii=False, default=str)
         except Exception:
-            return default
+            text = str(data)
+        if len(text) > max_chars:
+            return text[:max_chars] + "\n... [truncated]"
+        return text
 
     def _get_nested(self, data: Dict[str, Any], keys: List[str], default=None):
         current = data
@@ -73,7 +142,7 @@ class LLMReportAgent:
 
     def _call_groq(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> Dict[str, Any]:
         if not self._is_available():
-            return {"success": False, "error": "Groq client is not available."}
+            return {"success": False, "llm_available": False, "error": "Groq client is not available. Check GROQ_API_KEY and groq package."}
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -85,15 +154,251 @@ class LLMReportAgent:
                 max_tokens=max_tokens or self.max_tokens,
             )
             text = response.choices[0].message.content.strip()
-            return {"success": True, "text": text}
+            if not text:
+                return {"success": False, "llm_available": False, "error": "Groq returned an empty response."}
+            return {"success": True, "llm_available": True, "text": self._sanitize_investment_wording(text)}
         except Exception as exc:
-            return {"success": False, "error": str(exc)}
+            return {"success": False, "llm_available": False, "error": str(exc)}
 
-    def _clean_markdown(self, text: str) -> str:
+    def _sanitize_investment_wording(self, text: str) -> str:
+        """Post-process Groq output so it stays safely framed as paper decision support."""
         if not text:
-            return ""
-        # Keep markdown readable but avoid large model rambles.
-        return text.strip()
+            return text
+        replacements = [
+            (r"\bbefore buying\b", "before considering a paper-trading entry"),
+            (r"\bwhen buying\b", "when reviewing a paper-trading entry"),
+            (r"\bshould buy\b", "could review as a research candidate"),
+            (r"\brecommend buying\b", "mark as a research candidate"),
+            (r"\bbuy this stock\b", "review this stock as a paper candidate"),
+            (r"\bstrong buy\b", "strong research candidate"),
+            (r"\bshould sell\b", "should review risk exposure in paper tracking"),
+            (r"\brecommend selling\b", "suggests a paper risk-review stance"),
+            (r"\bsell this stock\b", "review this stock's risk in paper tracking"),
+            (r"\bclear your position\b", "review the paper position exposure"),
+            (r"\badd leverage\b", "avoid leverage in this prototype"),
+            (r"\buse leverage\b", "use no leverage in this prototype"),
+        ]
+        clean = text
+        for pattern, replacement in replacements:
+            clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
+        return clean.strip()
+
+    def _short_system_prompt(self, task: str) -> str:
+        return (
+            f"You are the report writer for a class stock-analysis prototype. {task} "
+            "Use only the supplied facts. Keep it short and natural. "
+            "Do not give real trading advice. Do not say the user should buy, sell, clear a position, or use leverage. "
+            "Use paper-decision wording such as watchlist, research candidate, wait for confirmation, or risk review."
+        )
+
+    # ------------------------------------------------------------------
+    # Ticker and mode helpers
+    # ------------------------------------------------------------------
+    def _extract_symbol_from_text(self, text: str) -> Optional[str]:
+        text = text or ""
+        upper_text = text.upper()
+        for token in re.findall(r"\b[A-Z]{1,5}\b", upper_text):
+            if token not in self.TICKER_STOP_WORDS:
+                return token
+        lower_text = text.lower()
+        for company, ticker in self.COMPANY_TO_TICKER.items():
+            if company in lower_text:
+                return ticker
+        return None
+
+    def _resolve_symbol(self, report_text: str, symbol: Optional[str] = None, ticker_override: Optional[str] = None) -> Optional[str]:
+        # Important: ticker in the actual input wins over UI fallback/override.
+        from_text = self._extract_symbol_from_text(report_text or "")
+        if from_text:
+            return from_text.upper()
+        if symbol:
+            return str(symbol).strip().upper()
+        if ticker_override:
+            return str(ticker_override).strip().upper()
+        return None
+
+    def _infer_source_mode(self, report_text: str, requested_mode: str = "auto") -> str:
+        text = (report_text or "").lower()
+        requested = (requested_mode or "auto").lower()
+        has_news = any(w in text for w in ["news", "headline", "headlines", "latest", "recent", "this week", "what happened"])
+        has_financial = any(w in text for w in ["financial", "report", "earnings", "income statement", "annual", "quarter", "last year", "results"])
+        has_pasted = len(re.findall(r"\w+", text)) >= 18
+
+        # User text should override stale UI mode when it clearly asks for news/report.
+        if has_news and has_financial:
+            return "news_and_financial"
+        if has_news:
+            return "news"
+        if has_financial:
+            return "financial"
+        if requested in {"news", "financial", "news_and_financial", "both", "pasted_text"}:
+            return "news_and_financial" if requested == "both" else requested
+        if has_pasted:
+            return "pasted_text"
+        return "news"
+
+    # ------------------------------------------------------------------
+    # News / financial fetch and filtering
+    # ------------------------------------------------------------------
+    def _fetch_finnhub_news(self, symbol: str, lookback_days: int = 7, scan_limit: int = 40) -> Dict[str, Any]:
+        if not self.finnhub_key:
+            return {"success": False, "error": "FINNHUB_API_KEY is missing.", "items": [], "raw_count": 0}
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=max(1, int(lookback_days or 7)))
+        params = {"symbol": symbol, "from": start.isoformat(), "to": today.isoformat(), "token": self.finnhub_key}
+        try:
+            response = requests.get("https://finnhub.io/api/v1/company-news", params=params, timeout=12)
+            response.raise_for_status()
+            raw = response.json()
+            if not isinstance(raw, list):
+                return {"success": False, "error": "Finnhub returned non-list data.", "items": [], "raw_count": 0}
+            items = []
+            for row in raw[:scan_limit]:
+                dt = row.get("datetime")
+                date_text = "Unknown"
+                if dt:
+                    try:
+                        date_text = datetime.fromtimestamp(int(dt), timezone.utc).strftime("%Y-%m-%d")
+                    except Exception:
+                        date_text = str(dt)
+                items.append({
+                    "date": date_text,
+                    "headline": (row.get("headline") or "").strip(),
+                    "summary": (row.get("summary") or "").strip(),
+                    "source": row.get("source") or "Unknown",
+                    "url": row.get("url") or "",
+                })
+            return {"success": True, "error": None, "items": items, "raw_count": len(raw), "lookback_days": lookback_days}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "items": [], "raw_count": 0}
+
+    def _news_relevance_score(self, symbol: str, item: Dict[str, Any]) -> Tuple[float, str, str]:
+        text = f"{item.get('headline', '')} {item.get('summary', '')}".lower()
+        terms = self.COMPANY_TERMS.get(symbol.upper(), [symbol.lower()])
+        strong_hits = [t for t in terms if t in text]
+        score = 0.0
+        reasons = []
+        if symbol.lower() in text:
+            score += 0.60
+            reasons.append(f"mentions ticker {symbol}")
+        if strong_hits:
+            score += min(0.50, 0.15 * len(strong_hits))
+            reasons.append("mentions company terms: " + ", ".join(strong_hits[:4]))
+        # Penalise obviously broad/ETF/newsletter topics unless they also have strong company mentions.
+        broad_terms = ["qqq", "etf", "spacex", "trump", "s&p", "nasdaq", "dow jones", "mega-cap", "market bubble"]
+        broad_hits = [t for t in broad_terms if t in text]
+        if broad_hits and score < 0.75:
+            score -= 0.25
+            reasons.append("looks broad/market-related: " + ", ".join(broad_hits[:3]))
+        label = "company_specific" if score >= 0.45 else "excluded_broad_or_uncertain"
+        return max(0.0, min(1.0, score)), label, "; ".join(reasons) or "no strong company-specific terms found"
+
+    def _filter_company_news(self, symbol: str, items: List[Dict[str, Any]], max_news: int = 5) -> Dict[str, Any]:
+        kept = []
+        excluded = []
+        for item in items:
+            score, label, reason = self._news_relevance_score(symbol, item)
+            row = dict(item)
+            row["relevance_score"] = round(score, 3)
+            row["relevance_label"] = label
+            row["relevance_reason"] = reason
+            if label == "company_specific":
+                kept.append(row)
+            else:
+                excluded.append(row)
+        kept = sorted(kept, key=lambda x: x.get("relevance_score", 0), reverse=True)
+        return {
+            "company_specific_items": kept[:max_news],
+            "excluded_items": excluded[:10],
+            "kept_count": len(kept[:max_news]),
+            "excluded_count": len(excluded),
+        }
+
+    def _fetch_alpha_vantage_snapshot(self, symbol: str) -> Dict[str, Any]:
+        if not self.alpha_vantage_key:
+            return {"success": False, "error": "ALPHA_VANTAGE_API_KEY is missing.", "snapshot": {}}
+        snapshot = {}
+        errors = []
+        try:
+            r = requests.get(
+                "https://www.alphavantage.co/query",
+                params={"function": "INCOME_STATEMENT", "symbol": symbol, "apikey": self.alpha_vantage_key},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+            q = (data.get("quarterlyReports") or [])[:1]
+            a = (data.get("annualReports") or [])[:1]
+            if q:
+                snapshot["latest_quarter"] = {k: q[0].get(k) for k in ["fiscalDateEnding", "reportedCurrency", "totalRevenue", "operatingIncome", "netIncome"]}
+            if a:
+                snapshot["latest_annual"] = {k: a[0].get(k) for k in ["fiscalDateEnding", "reportedCurrency", "totalRevenue", "operatingIncome", "netIncome"]}
+        except Exception as exc:
+            errors.append(f"income statement error: {exc}")
+        try:
+            r = requests.get(
+                "https://www.alphavantage.co/query",
+                params={"function": "EARNINGS", "symbol": symbol, "apikey": self.alpha_vantage_key},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+            e = (data.get("quarterlyEarnings") or [])[:1]
+            if e:
+                snapshot["latest_earnings"] = {k: e[0].get(k) for k in ["fiscalDateEnding", "reportedDate", "reportedEPS", "estimatedEPS", "surprise", "surprisePercentage"]}
+        except Exception as exc:
+            errors.append(f"earnings error: {exc}")
+        return {"success": bool(snapshot), "error": "; ".join(errors) if errors else None, "snapshot": snapshot}
+
+    def _build_source_context(
+        self,
+        report_text: str,
+        source_mode: str,
+        symbol: Optional[str],
+        ticker_override: Optional[str],
+        lookback_days: int,
+        max_news: int,
+    ) -> Dict[str, Any]:
+        resolved_symbol = self._resolve_symbol(report_text, symbol=symbol, ticker_override=ticker_override)
+        effective_mode = self._infer_source_mode(report_text, source_mode)
+        context = {
+            "symbol": resolved_symbol,
+            "requested_source_mode": source_mode,
+            "effective_source_mode": effective_mode,
+            "user_text": report_text,
+            "source_status": [],
+            "company_specific_news": [],
+            "excluded_news": [],
+            "verified_news": {},
+            "financial_snapshot": {},
+        }
+        if not resolved_symbol and effective_mode != "pasted_text":
+            context["source_status"].append("No ticker or company name was detected, so live source fetching was skipped.")
+            return context
+
+        if effective_mode in {"news", "news_and_financial"} and resolved_symbol:
+            news = self._fetch_finnhub_news(resolved_symbol, lookback_days=lookback_days, scan_limit=max(40, max_news * 8))
+            context["verified_news"] = news
+            if news.get("success"):
+                filtered = self._filter_company_news(resolved_symbol, news.get("items", []), max_news=max_news)
+                context.update(filtered)
+                context["source_status"].append(
+                    f"Fetched {len(news.get('items', []))} Finnhub items for {resolved_symbol}; kept {filtered['kept_count']} company-specific items; excluded {filtered['excluded_count']} broad or uncertain items."
+                )
+            else:
+                context["source_status"].append(f"Finnhub news was not available: {news.get('error')}")
+
+        if effective_mode in {"financial", "news_and_financial"} and resolved_symbol:
+            snapshot = self._fetch_alpha_vantage_snapshot(resolved_symbol)
+            context["financial_snapshot"] = snapshot
+            if snapshot.get("success"):
+                context["source_status"].append(f"Fetched Alpha Vantage financial snapshot for {resolved_symbol}.")
+            else:
+                context["source_status"].append(f"Alpha Vantage snapshot was not available: {snapshot.get('error')}")
+
+        if effective_mode == "pasted_text":
+            context["source_status"].append("Used pasted text only. No live source was fetched.")
+        return context
 
     # ------------------------------------------------------------------
     # Single-stock report
@@ -106,15 +411,18 @@ class LLMReportAgent:
         training_result: Dict[str, Any],
         signal_result: Dict[str, Any],
         risk_result: Dict[str, Any],
-        strategy_result: Dict[str, Any],
+        strategy_result: Optional[Dict[str, Any]] = None,
         reward_record_result: Optional[Dict[str, Any]] = None,
         auto_reward_update_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        strategy_result = strategy_result or {}
         symbol = (
             risk_result.get("symbol")
+            or self._get_nested(risk_result, ["risk_for_next_agent", "symbol"])
             or signal_result.get("symbol")
+            or self._get_nested(signal_result, ["signal_for_next_agent", "symbol"])
             or analysis_result.get("symbol")
-            or validation_result.get("symbol")
+            or self._get_nested(validation_result, ["validation_for_next_agent", "symbol"])
             or "UNKNOWN"
         )
         facts = {
@@ -134,18 +442,14 @@ class LLMReportAgent:
             "strategy_level": strategy_result.get("strategy_level"),
             "position_guidance": strategy_result.get("position_guidance"),
             "leverage_guidance": strategy_result.get("leverage_guidance"),
+            "checklist": strategy_result.get("checklist", []),
             "conditions_to_reconsider": strategy_result.get("conditions_to_reconsider", []),
         }
-        system_prompt = (
-            "You explain a multi-agent stock research system in simple English. "
-            "Do not give personalized financial advice. Do not invent facts. "
-            "Use only the supplied agent facts. Keep the answer short, practical, and natural. "
-            "Do not override the Risk Agent or Strategist Agent."
-        )
+        system_prompt = self._short_system_prompt("Explain one stock pipeline result.")
         user_prompt = (
-            "Explain this result for a class demo. Use these headings exactly:\n"
-            "Direct answer\nEvidence from agents\nStrategy guidance\nRisk warning\nNot financial advice disclaimer\n\n"
-            f"Agent facts:\n{facts}"
+            "Use these headings: Direct answer, Evidence, Strategy, Risk note, Disclaimer.\n"
+            "Explain the result without direct buy/sell instructions.\n\n"
+            f"Facts:\n{self._safe_json(facts)}"
         )
         groq = self._call_groq(system_prompt, user_prompt)
         if groq.get("success"):
@@ -160,33 +464,32 @@ class LLMReportAgent:
                 "llm_available": True,
                 "llm_error": None,
                 "symbol": symbol,
-                "plain_language_report": self._clean_markdown(groq["text"]),
+                "plain_language_report": groq["text"],
                 "summary": f"Groq Report Agent generated a single-stock explanation for {symbol}.",
             }
-        fallback = self._fallback_single_stock(facts, groq.get("error"))
-        return fallback
+        return self._fallback_single_stock(facts, groq.get("error"))
 
     def _fallback_single_stock(self, facts: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
         symbol = facts.get("symbol", "UNKNOWN")
         report = f"""
 **Direct answer**  
-{symbol} is not presented as a direct buy or sell instruction. The risk-controlled signal is **{facts.get('risk_final_signal')}**, and the strategy action is **{facts.get('strategy_action')}**.
+{symbol} is not a direct trading instruction. The risk-controlled signal is **{facts.get('risk_final_signal')}**, and the strategy action is **{facts.get('strategy_action')}**.
 
-**Evidence from agents**  
+**Evidence**  
 - Validation confidence: {facts.get('validation_confidence')}  
-- Analyst signal: {facts.get('analyst_display') or facts.get('analyst_signal')} with score {facts.get('analyst_score')}  
-- Model signal: {facts.get('model_signal')} with {facts.get('model_confidence')} confidence  
+- Analyst view: {facts.get('analyst_display') or facts.get('analyst_signal')}  
+- Model view: {facts.get('model_display') or facts.get('model_signal')} with {facts.get('model_confidence')} confidence  
 - Risk level: {facts.get('risk_level')}  
 - Strategy level: {facts.get('strategy_level')}
 
-**Strategy guidance**  
+**Strategy**  
 {facts.get('position_guidance') or 'Use this as a research note only.'}
 
-**Risk warning**  
+**Risk note**  
 {facts.get('risk_interpretation') or 'Market conditions can change quickly.'}
 
-**Not financial advice disclaimer**  
-This output is for paper decision support and class demonstration only. It is not personalized financial advice.
+**Disclaimer**  
+This is for paper decision support and class demonstration only. It is not personalized financial advice.
 """.strip()
         return {
             "success": True,
@@ -204,302 +507,202 @@ This output is for paper decision support and class demonstration only. It is no
     # ------------------------------------------------------------------
     # Screener report
     # ------------------------------------------------------------------
-    def generate_screener_report(self, user_question: str, screener_result: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_screener_report(self, user_question: Optional[str] = None, screener_result: Optional[Dict[str, Any]] = None, *args, **kwargs) -> Dict[str, Any]:
+        # Backward compatibility: app may call generate_screener_report(screener_result, user_question=...)
+        if isinstance(user_question, dict) and screener_result is None:
+            screener_result = user_question
+            user_question = kwargs.get("user_question") or "Explain the screener result."
+        screener_result = screener_result or kwargs.get("screener_result") or {}
+        user_question = user_question or kwargs.get("question") or "Explain the screener result."
+
         top = screener_result.get("top_buy_candidates", [])[:5]
-        risk = screener_result.get("highest_risk_candidates", [])[:5]
-        facts = {"question": user_question, "top_buy_candidates": top, "highest_risk_candidates": risk}
-        prompt = (
-            "Explain the screener output briefly. Only use the supplied rows. "
-            "Use simple headings: Direct answer, Stronger watchlist names, Caution names, Risk warning.\n\n"
-            f"Facts:\n{facts}"
-        )
-        groq = self._call_groq(
-            "You explain a watchlist screener. Do not provide direct trading advice or invent facts.",
-            prompt,
-            max_tokens=700,
-        )
+        risk = screener_result.get("highest_risk_candidates", screener_result.get("top_sell_risk", []))[:5]
+        facts = {"question": user_question, "top_candidates": top, "caution_candidates": risk}
+        prompt = f"Explain this watchlist screener briefly. Use no direct trading advice.\n\nFacts:\n{self._safe_json(facts)}"
+        groq = self._call_groq(self._short_system_prompt("Explain a watchlist screener."), prompt, max_tokens=700)
         if groq.get("success"):
             return {
                 "success": True,
                 "agent": "Groq Report Agent",
                 "report_type": "screener_explanation",
                 "source": "groq",
+                "provider": "groq",
+                "model": self.model,
                 "llm_available": True,
+                "llm_error": None,
                 "plain_language_report": groq["text"],
                 "summary": "Groq Report Agent explained the screener result.",
             }
+        return self._fallback_screener(top, risk, groq.get("error"))
+
+    def _fallback_screener(self, top: List[Dict[str, Any]], risk: List[Dict[str, Any]], error: Optional[str] = None) -> Dict[str, Any]:
         top_names = ", ".join([r.get("symbol", "") for r in top if r.get("symbol")]) or "none"
         risk_names = ", ".join([r.get("symbol", "") for r in risk if r.get("symbol")]) or "none"
+        report = (
+            f"**Direct answer**\nThe strongest watchlist names for further research are: {top_names}.\n\n"
+            f"**Caution names**\nThe names needing more caution are: {risk_names}.\n\n"
+            "**Risk note**\nThis is a watchlist screener, not a full-market scan or a direct trading instruction."
+        )
         return {
             "success": True,
             "agent": "Groq Report Agent",
             "report_type": "screener_explanation",
             "source": "local_fallback",
+            "provider": "local_fallback",
             "llm_available": False,
-            "llm_error": groq.get("error"),
-            "plain_language_report": (
-                f"**Direct answer**  \nThe strongest watchlist candidates are {top_names}. The caution names are {risk_names}.\n\n"
-                "**Risk warning**  \nThis is a watchlist scan, not a full market scan or financial advice."
-            ),
+            "llm_error": error,
+            "plain_language_report": report,
             "summary": "Local fallback explained the screener result.",
         }
 
     # ------------------------------------------------------------------
-    # Verified financial/news summarizer
+    # Financial report / news summariser
     # ------------------------------------------------------------------
-    def _detect_symbol(self, text: str, fallback: Optional[str] = None) -> str:
-        text = text or ""
-        tickers = re.findall(r"\b[A-Z]{1,5}\b", text.upper())
-        common_words = {"NEWS", "REPORT", "FINANCIAL", "THE", "AND", "FOR", "THIS", "WEEK", "LAST", "YEAR"}
-        for ticker in tickers:
-            if ticker not in common_words:
-                return ticker
-        text_l = text.lower()
-        for ticker, terms in self.COMPANY_TERMS.items():
-            if any(term in text_l for term in terms):
-                return ticker
-        return str(fallback or "").upper().strip()
-
-    def _company_terms(self, symbol: str) -> List[str]:
-        symbol = str(symbol or "").upper().strip()
-        return self.COMPANY_TERMS.get(symbol, [symbol.lower()]) + [symbol.lower()]
-
-    def _fetch_finnhub_news(self, symbol: str, lookback_days: int = 7, max_news: int = 5) -> Dict[str, Any]:
-        if not self.finnhub_key or not symbol:
-            return {"success": False, "items": [], "error": "Finnhub key or symbol missing."}
-        to_date = datetime.utcnow().date()
-        from_date = to_date - timedelta(days=int(lookback_days or 7))
-        try:
-            response = requests.get(
-                "https://finnhub.io/api/v1/company-news",
-                params={"symbol": symbol, "from": str(from_date), "to": str(to_date), "token": self.finnhub_key},
-                timeout=12,
-            )
-            if response.status_code != 200:
-                return {"success": False, "items": [], "error": f"Finnhub HTTP {response.status_code}"}
-            raw = response.json()
-            if not isinstance(raw, list):
-                return {"success": False, "items": [], "error": "Finnhub did not return a news list."}
-            filtered = self._filter_relevant_news(symbol, raw, max_news=max_news)
-            return {"success": True, "items": filtered, "raw_count": len(raw)}
-        except Exception as exc:
-            return {"success": False, "items": [], "error": str(exc)}
-
-    def _score_news_item(self, symbol: str, item: Dict[str, Any]) -> int:
-        terms = self._company_terms(symbol)
-        text = f"{item.get('headline','')} {item.get('summary','')} {item.get('source','')}".lower()
-        score = 0
-        reason = []
-        if symbol.lower() in text:
-            score += 5
-            reason.append("ticker mentioned")
-        for term in terms:
-            if term and term in text:
-                score += 3 if term != symbol.lower() else 2
-                reason.append(f"company term: {term}")
-                break
-        product_terms = [t for t in terms if len(t) > 3]
-        for term in product_terms:
-            if term in text:
-                score += 1
-        broad_markets = ["s&p", "nasdaq", "market", "etf", "dow", "treasury", "fed", "bubble"]
-        if any(term in text for term in broad_markets) and not any(term in text for term in terms):
-            score -= 3
-            reason.append("broad market only")
-        item["relevance_score"] = score
-        item["relevance_reason"] = "; ".join(reason) if reason else "weak relevance"
-        return score
-
-    def _filter_relevant_news(self, symbol: str, items: List[Dict[str, Any]], max_news: int = 5) -> List[Dict[str, Any]]:
-        scored = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            score = self._score_news_item(symbol, item)
-            if score >= 4:
-                scored.append(item)
-        scored = sorted(scored, key=lambda x: x.get("relevance_score", 0), reverse=True)
-        cleaned = []
-        seen = set()
-        for item in scored:
-            headline = str(item.get("headline", "")).strip()
-            if not headline or headline.lower() in seen:
-                continue
-            seen.add(headline.lower())
-            date_value = item.get("datetime")
-            try:
-                date_text = datetime.utcfromtimestamp(int(date_value)).strftime("%Y-%m-%d") if date_value else ""
-            except Exception:
-                date_text = ""
-            cleaned.append({
-                "date": date_text,
-                "source": item.get("source", ""),
-                "headline": headline,
-                "summary": item.get("summary", ""),
-                "url": item.get("url", ""),
-                "relevance_score": item.get("relevance_score"),
-                "relevance_reason": item.get("relevance_reason"),
-            })
-            if len(cleaned) >= int(max_news or 5):
-                break
-        return cleaned
-
-    def _fetch_alpha_snapshot(self, symbol: str) -> Dict[str, Any]:
-        if not self.alpha_vantage_key or not symbol:
-            return {"success": False, "error": "Alpha Vantage key or symbol missing."}
-        try:
-            response = requests.get(
-                "https://www.alphavantage.co/query",
-                params={"function": "OVERVIEW", "symbol": symbol, "apikey": self.alpha_vantage_key},
-                timeout=12,
-            )
-            if response.status_code != 200:
-                return {"success": False, "error": f"Alpha Vantage HTTP {response.status_code}"}
-            data = response.json()
-            if not isinstance(data, dict) or not data.get("Symbol"):
-                return {"success": False, "error": "No company overview returned."}
-            keep = ["Symbol", "Name", "Sector", "Industry", "MarketCapitalization", "PERatio", "ProfitMargin", "QuarterlyRevenueGrowthYOY", "QuarterlyEarningsGrowthYOY", "AnalystTargetPrice"]
-            return {"success": True, "snapshot": {k: data.get(k) for k in keep}}
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
-
-    def _infer_mode(self, text: str, source_mode: str) -> str:
-        selected = str(source_mode or "auto").lower().strip()
-        if selected in ["news", "financial", "news_and_financial", "pasted_text"]:
-            # Still correct obvious query mismatch: "MSFT news" should be news.
-            if "news" in text.lower() and selected == "financial":
-                return "news"
-            return selected
-        low = text.lower()
-        if "news" in low:
-            return "news"
-        if any(term in low for term in ["financial", "report", "earnings", "revenue", "margin", "guidance"]):
-            return "financial"
-        return "pasted_text"
-
-    def _build_source_context(self, report_text: str, source_mode: str, symbol: str, lookback_days: int, max_news: int) -> Dict[str, Any]:
-        mode = self._infer_mode(report_text, source_mode)
-        context = {
-            "symbol": symbol,
-            "mode": mode,
-            "pasted_text": report_text,
-            "news": [],
-            "financial_snapshot": None,
-            "source_status": [],
-        }
-        should_fetch_news = mode in ["news", "news_and_financial"] or (mode == "financial" and "news" in report_text.lower())
-        should_fetch_financial = mode in ["financial", "news_and_financial"]
-        if symbol and should_fetch_news:
-            news = self._fetch_finnhub_news(symbol, lookback_days, max_news)
-            if news.get("success"):
-                context["news"] = news.get("items", [])
-                context["source_status"].append(f"Fetched {news.get('raw_count', 0)} Finnhub news items and kept {len(context['news'])} relevant company items for {symbol}.")
-            else:
-                context["source_status"].append(f"Finnhub news was not available: {news.get('error')}")
-        if symbol and should_fetch_financial:
-            snap = self._fetch_alpha_snapshot(symbol)
-            if snap.get("success"):
-                context["financial_snapshot"] = snap.get("snapshot")
-                context["source_status"].append(f"Fetched a lightweight Alpha Vantage company snapshot for {symbol}.")
-            else:
-                context["source_status"].append(f"Alpha Vantage company snapshot was not available: {snap.get('error')}")
-        if not context["source_status"]:
-            context["source_status"].append("Used pasted text only; no external source was added.")
-        return context
-
     def simplify_financial_text(
         self,
-        report_text: str,
+        report_text: str = "",
+        user_question: str = "Please simplify this financial report or news text.",
         question: Optional[str] = None,
-        user_question: Optional[str] = None,
         source_mode: str = "auto",
         symbol: Optional[str] = None,
+        ticker_override: Optional[str] = None,
         lookback_days: int = 7,
         max_news: int = 5,
+        max_news_items: Optional[int] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         report_text = report_text or ""
-        question = question or user_question or "Simplify this financial/news text."
-        detected_symbol = self._detect_symbol(report_text, fallback=symbol)
-        context = self._build_source_context(report_text, source_mode, detected_symbol, lookback_days, max_news)
-        system_prompt = (
-            "You are a careful financial news/report summarizer for a class project. "
-            "Use only the supplied pasted text, retrieved company-specific news, and company snapshot. "
-            "Do not mix in unrelated market news. Do not provide trading advice. If evidence is limited, say so. "
-            "Write simply and naturally."
+        user_question = question or user_question or kwargs.get("financial_question") or "Summarise this financial/news input."
+        if max_news_items is not None:
+            max_news = max_news_items
+        context = self._build_source_context(
+            report_text=report_text,
+            source_mode=source_mode,
+            symbol=symbol,
+            ticker_override=ticker_override,
+            lookback_days=int(lookback_days or 7),
+            max_news=int(max_news or 5),
         )
+        if not report_text.strip() and not context.get("symbol"):
+            return {
+                "success": False,
+                "agent": "Groq Report Agent",
+                "report_type": "financial_news_or_report_simplification",
+                "source": "none",
+                "llm_available": False,
+                "plain_language_report": "No text or ticker was provided.",
+                "summary": "No text or ticker was provided.",
+            }
+
+        system_prompt = self._short_system_prompt("Summarise source-grounded company news or financial text.")
         user_prompt = (
-            "Use this structure exactly:\n"
-            "Summary\nVerified source status\nCompany-specific points\nPositive signals\nRisks\nPossible market impact\nCautious conclusion\n\n"
-            f"Question: {question}\n"
-            f"Context: {context}"
+            "Use these headings: Summary, Sources checked, Relevant company news, Excluded broad news, Financial snapshot, Risks, Cautious conclusion.\n"
+            "Only use the context below. If relevant news is limited, say so.\n\n"
+            f"User question: {user_question}\n\nContext:\n{self._safe_json(context)}"
         )
-        groq = self._call_groq(system_prompt, user_prompt, max_tokens=900)
+        groq = self._call_groq(system_prompt, user_prompt, max_tokens=1000)
         if groq.get("success"):
             report = groq["text"]
             source = "groq"
             llm_available = True
             llm_error = None
+            summary = "Groq financial/news summary generated successfully."
         else:
-            report = self._fallback_financial_report(context)
+            report = self._fallback_financial_summary(context)
             source = "local_fallback"
             llm_available = False
             llm_error = groq.get("error")
+            summary = "Local fallback financial/news summary generated successfully."
+
         return {
             "success": True,
             "agent": "Groq Report Agent",
-            "agent_goal": "Summarize only verified pasted or API-sourced company information.",
-            "report_type": "verified_financial_news_summary",
+            "agent_goal": "Summarise financial/news input with source-grounded context.",
+            "report_type": "financial_news_or_report_simplification",
             "source": source,
-            "provider": source,
+            "provider": "groq" if source == "groq" else "local_fallback",
             "model": self.model,
             "llm_available": llm_available,
             "llm_error": llm_error,
-            "symbol": detected_symbol,
-            "detected_symbol": detected_symbol,
-            "mode": context.get("mode"),
+            "symbol": context.get("symbol"),
+            "source_mode": context.get("effective_source_mode"),
+            "requested_source_mode": context.get("requested_source_mode"),
             "source_status": context.get("source_status", []),
-            "retrieved_news_items": context.get("news", []),
-            "financial_snapshot": context.get("financial_snapshot"),
+            "company_specific_news": context.get("company_specific_news", []),
+            "excluded_news": context.get("excluded_news", []),
+            "verified_news": context.get("verified_news", {}),
+            "financial_snapshot": context.get("financial_snapshot", {}),
             "plain_language_report": report,
-            "summary": "Groq financial/news summary generated successfully." if llm_available else "Local fallback financial/news summary generated safely.",
+            "summary": summary,
         }
 
-    def _fallback_financial_report(self, context: Dict[str, Any]) -> str:
+    def _fallback_financial_summary(self, context: Dict[str, Any]) -> str:
         symbol = context.get("symbol") or "the company"
-        status = context.get("source_status", [])
-        news = context.get("news", [])
-        snapshot = context.get("financial_snapshot")
-        lines = [
-            "**Summary**  ",
-            f"The system used source-grounded information for {symbol}. It did not add outside facts.",
-            "",
-            "**Verified source status**  ",
-        ]
-        for item in status:
-            lines.append(f"- {item}")
-        if news:
-            lines += ["", "**Company-specific points**  "]
-            for i, item in enumerate(news[:5], 1):
-                lines.append(f"{i}. {item.get('date','')} | {item.get('source','')} | {item.get('headline','')}")
-        elif context.get("pasted_text"):
-            lines += ["", "**Company-specific points**  ", context.get("pasted_text")[:900]]
+        source_status = context.get("source_status", [])
+        relevant = context.get("company_specific_news", [])
+        excluded = context.get("excluded_news", [])
+        snapshot = (context.get("financial_snapshot") or {}).get("snapshot", {})
+        user_text = context.get("user_text", "")
+
+        lines = []
+        lines.append("**Summary**")
+        if relevant or snapshot:
+            lines.append(f"The summary uses source-grounded data for {symbol}. It does not add unstated facts.")
+        elif user_text.strip():
+            lines.append("The input was treated as pasted text or a short query, but limited source-grounded information was available.")
         else:
-            lines += ["", "**Company-specific points**  ", "No company-specific text or verified news item was available."]
+            lines.append("No useful input was provided.")
+
+        lines.append("\n**Sources checked**")
+        if source_status:
+            lines.extend([f"- {s}" for s in source_status])
+        else:
+            lines.append("- No external source was checked.")
+
+        lines.append("\n**Relevant company news**")
+        if relevant:
+            for i, item in enumerate(relevant[:5], 1):
+                lines.append(f"{i}. {item.get('date')} | {item.get('source')} | {item.get('headline')}  ")
+                lines.append(f"   Relevance: {item.get('relevance_score')} — {item.get('relevance_reason')}")
+        else:
+            lines.append("- No clearly company-specific news passed the relevance filter.")
+
+        lines.append("\n**Excluded broad news**")
+        if excluded:
+            for i, item in enumerate(excluded[:5], 1):
+                lines.append(f"{i}. {item.get('date')} | {item.get('source')} | {item.get('headline')}")
+        else:
+            lines.append("- No broad or uncertain news was excluded.")
+
+        lines.append("\n**Financial snapshot**")
         if snapshot:
-            lines += ["", "**Positive signals / risks from snapshot**  "]
-            lines.append(str(snapshot))
-        lines += [
-            "",
-            "**Positive signals**  ",
-            "Only treat positive points as source-limited cues, not as a buy signal.",
-            "",
-            "**Risks**  ",
-            "Headlines and short summaries may be incomplete. Check full filings or full articles before using them.",
-            "",
-            "**Possible market impact**  ",
-            "The direction and size of market impact cannot be concluded from headlines alone.",
-            "",
-            "**Cautious conclusion**  ",
-            "Use this as a verified research summary only. It is not trading advice.",
-        ]
+            lines.append(self._safe_json(snapshot, max_chars=1500))
+        else:
+            lines.append("- No verified financial snapshot was available.")
+
+        lines.append("\n**Risks**")
+        lines.append("- Headlines alone are not enough to make a real trading decision.")
+        lines.append("- The source data may be incomplete, delayed, or rate-limited.")
+
+        lines.append("\n**Cautious conclusion**")
+        lines.append("Use this as a paper research summary only, not personalized financial advice.")
         return "\n".join(lines)
+
+    # Backward-compatible aliases
+    def simplify_financial_report(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.simplify_financial_text(*args, **kwargs)
+
+    def simplify_report(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.simplify_financial_text(*args, **kwargs)
+
+    def summarize_financial_text(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.simplify_financial_text(*args, **kwargs)
+
+    def generate_screener_explanation(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.generate_screener_report(*args, **kwargs)
+
+    def explain_screener_result(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.generate_screener_report(*args, **kwargs)
+
+    def run(self, *args, **kwargs) -> Dict[str, Any]:
+        return self.generate_single_stock_report(*args, **kwargs)

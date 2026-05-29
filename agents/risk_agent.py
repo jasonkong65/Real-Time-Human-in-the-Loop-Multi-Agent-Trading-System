@@ -1,53 +1,123 @@
 import json
+import math
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import pandas as pd
-from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+
+class DQNNetwork(nn.Module):
+    """
+    Small feed-forward Q-network used by RiskAgent.
+
+    Input: numeric risk state vector.
+    Output: Q-values for [KEEP_SIGNAL, DOWNGRADE_TO_HOLD, BLOCK_TRADE].
+    """
+
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 class RiskAgent:
     """
-    Risk Agent with a lightweight DQN-style advisory layer.
+    Strict DQN Risk Agent.
 
-    It keeps the safety-first rule layer, but replaces the old Q-table decision
-    logic with a small neural-network Q-value approximator. No extra deep
-    learning package is required; sklearn's MLPRegressor is used as a compact
-    DQN-style model for the assignment prototype.
+    Role:
+    - Hard rule-based safety layer decides non-negotiable safety constraints.
+    - PyTorch DQN advisory layer learns risk actions from delayed paper rewards.
+    - Target network + replay memory make it a real DQN implementation, not only
+      a DQN-style sklearn approximator.
 
-    Important: the DQN layer is advisory only. Hard safety rules can block or
-    soften a signal. The DQN cannot create a hard block by itself.
+    Safety design:
+    - DQN is advisory. It can increase caution for risky buy setups, but it cannot
+      create BLOCK_TRADE by itself unless hard safety already triggered a block.
+    - This keeps the project suitable for paper decision support, not real trading.
     """
 
     ACTIONS = ["KEEP_SIGNAL", "DOWNGRADE_TO_HOLD", "BLOCK_TRADE"]
     ACTION_INDEX = {name: idx for idx, name in enumerate(ACTIONS)}
-    MODEL_SIGNALS = {"BUY_CANDIDATE": 1.0, "HOLD": 0.0, "SELL_RISK": -1.0, "BLOCKED": -0.5}
+    INDEX_ACTION = {idx: name for name, idx in ACTION_INDEX.items()}
+
+    MODEL_SIGNALS = {
+        "BUY_CANDIDATE": 1.0,
+        "HOLD": 0.0,
+        "SELL_RISK": -1.0,
+        "BLOCKED": -0.5,
+        "BUY_WATCHLIST_OVERBOUGHT": 0.6,
+        "BUY_WATCHLIST_ENTRY_RISK": 0.6,
+        "WATCHLIST_BULLISH_ENTRY_RISK": 0.6,
+    }
+
+    STATE_DIM = 13
 
     def __init__(
         self,
-        dqn_model_path: str = "models/risk_dqn_model.pkl",
+        dqn_model_path: str = "models/risk_dqn_model.pt",
+        target_model_path: str = "models/risk_dqn_target_model.pt",
         replay_path: str = "data/risk_dqn_replay.csv",
         q_table_path: str = "models/risk_q_table.pkl",
         epsilon: float = 0.08,
+        epsilon_min: float = 0.02,
+        epsilon_decay: float = 0.995,
         gamma: float = 0.90,
-        min_replay_samples: int = 8,
+        learning_rate: float = 0.001,
+        batch_size: int = 32,
+        min_replay_samples: int = 100,
+        target_update_steps: int = 25,
+        train_epochs_per_update: int = 4,
+        hidden_dim: int = 64,
+        seed: int = 42,
     ):
         self.dqn_model_path = Path(dqn_model_path)
+        self.target_model_path = Path(target_model_path)
         self.replay_path = Path(replay_path)
         self.q_table_path = Path(q_table_path)  # compatibility for older app/evaluator wording
+
         self.dqn_model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.target_model_path.parent.mkdir(parents=True, exist_ok=True)
         self.replay_path.parent.mkdir(parents=True, exist_ok=True)
         self.q_table_path.parent.mkdir(parents=True, exist_ok=True)
+
         self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
         self.gamma = gamma
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
         self.min_replay_samples = min_replay_samples
-        self.model = None
-        self.scaler = None
+        self.target_update_steps = target_update_steps
+        self.train_epochs_per_update = train_epochs_per_update
+        self.hidden_dim = hidden_dim
+        self.seed = seed
+
+        random.seed(seed)
+        torch.manual_seed(seed)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy_net = DQNNetwork(self.STATE_DIM, len(self.ACTIONS), hidden_dim).to(self.device)
+        self.target_net = DQNNetwork(self.STATE_DIM, len(self.ACTIONS), hidden_dim).to(self.device)
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate)
+        self.loss_fn = nn.SmoothL1Loss()
+        self.training_steps = 0
+
         self.q_table = self._load_q_table_compat()
-        self._load_dqn()
+        self._load_or_init_dqn()
 
     # ------------------------------------------------------------------
     # Safe extraction helpers
@@ -56,7 +126,12 @@ class RiskAgent:
         try:
             if value is None or value == "":
                 return default
-            return float(value)
+            if isinstance(value, str) and value.lower() in ["none", "nan", "null"]:
+                return default
+            output = float(value)
+            if math.isnan(output) or math.isinf(output):
+                return default
+            return output
         except Exception:
             return default
 
@@ -73,25 +148,36 @@ class RiskAgent:
                 return default
         return current
 
-    def _normalise_signal(self, value: Any, default: str = "HOLD") -> str:
+    def _normalise_label(self, value: Any, default: str = "UNKNOWN") -> str:
         if value is None:
             return default
         value = str(value).strip().upper()
         return value if value else default
 
-    def _get_symbol(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> str:
-        for data in [signal_result, analysis_result, validation_result]:
-            if isinstance(data, dict) and data.get("symbol"):
-                return str(data.get("symbol")).upper().strip()
-        nested = self._get_nested(signal_result, ["signal_for_next_agent", "symbol"])
-        return str(nested or "UNKNOWN").upper().strip()
+    def _get_symbol(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        validation_result: Dict[str, Any],
+    ) -> str:
+        candidates = [
+            signal_result.get("symbol") if isinstance(signal_result, dict) else None,
+            self._get_nested(signal_result, ["signal_for_next_agent", "symbol"]),
+            analysis_result.get("symbol") if isinstance(analysis_result, dict) else None,
+            validation_result.get("symbol") if isinstance(validation_result, dict) else None,
+            self._get_nested(validation_result, ["validation_for_next_agent", "symbol"]),
+        ]
+        for item in candidates:
+            if item:
+                return str(item).upper().strip()
+        return "UNKNOWN"
 
     def _validation_score(self, validation_result: Dict[str, Any]) -> float:
         score = self._safe_float(validation_result.get("confidence_score"))
         if score is not None:
             return self._clip(score)
         confidence = str(validation_result.get("confidence", "Medium")).lower()
-        return {"high": 1.0, "medium": 0.75, "low": 0.45}.get(confidence, 0.6)
+        return {"high": 1.0, "medium": 0.72, "low": 0.40}.get(confidence, 0.60)
 
     def _validation_confidence(self, validation_result: Dict[str, Any]) -> str:
         return str(validation_result.get("confidence", "Medium")).title()
@@ -100,16 +186,20 @@ class RiskAgent:
         return str(validation_result.get("next_action", "ALLOW_ANALYSIS")).upper()
 
     def _model_signal(self, signal_result: Dict[str, Any]) -> str:
-        return self._normalise_signal(
-            signal_result.get("model_signal") or self._get_nested(signal_result, ["signal_for_next_agent", "signal"]),
-            "HOLD",
+        value = (
+            signal_result.get("model_signal")
+            or signal_result.get("final_signal")
+            or signal_result.get("display_signal")
+            or self._get_nested(signal_result, ["signal_for_next_agent", "signal"])
+            or "HOLD"
         )
+        return self._normalise_label(value, "HOLD")
 
     def _model_confidence(self, signal_result: Dict[str, Any]) -> float:
         value = self._safe_float(signal_result.get("prediction_confidence"))
         if value is None:
             value = self._safe_float(self._get_nested(signal_result, ["signal_for_next_agent", "prediction_confidence"]))
-        return self._clip(value if value is not None else 0.5)
+        return self._clip(value if value is not None else 0.50)
 
     def _model_confidence_level(self, signal_result: Dict[str, Any]) -> str:
         level = signal_result.get("confidence_level") or self._get_nested(signal_result, ["signal_for_next_agent", "confidence_level"])
@@ -123,24 +213,35 @@ class RiskAgent:
         return "Low"
 
     def _analyst_signal(self, analysis_result: Dict[str, Any]) -> str:
-        return self._normalise_signal(analysis_result.get("analyst_signal"), "NEUTRAL")
+        return self._normalise_label(analysis_result.get("analyst_signal"), "NEUTRAL")
 
     def _analyst_score(self, analysis_result: Dict[str, Any]) -> float:
-        return self._clip(self._safe_float(analysis_result.get("analyst_score"), 0.5) or 0.5)
+        return self._clip(self._safe_float(analysis_result.get("analyst_score"), 0.50) or 0.50)
 
     def _entry_risk(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
         stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
-        value = analysis_result.get("entry_risk_level") or stage2.get("entry_risk_level") or self._get_nested(signal_result, ["context_used", "entry_risk_level"])
-        return str(value or "Medium").title()
+        value = (
+            analysis_result.get("entry_risk_level")
+            or stage2.get("entry_risk_level")
+            or self._get_nested(signal_result, ["context_used", "entry_risk_level"])
+            or "Medium"
+        )
+        return str(value).title()
 
     def _trend_direction(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
         stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
-        value = analysis_result.get("trend_direction") or stage2.get("trend_direction") or self._get_nested(signal_result, ["context_used", "trend_direction"])
-        return str(value or "Neutral").title()
+        value = (
+            analysis_result.get("trend_direction")
+            or stage2.get("trend_direction")
+            or self._get_nested(signal_result, ["context_used", "trend_direction"])
+            or "Neutral"
+        )
+        return str(value).title()
 
     def _volatility_level(self, analysis_result: Dict[str, Any]) -> str:
         stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
-        return str(analysis_result.get("volatility_level") or stage2.get("volatility_level") or "Unknown").title()
+        value = analysis_result.get("volatility_level") or stage2.get("volatility_level") or "Unknown"
+        return str(value).title()
 
     def _feature_value(self, analysis_result: Dict[str, Any], key: str, default: float = 0.0) -> float:
         features = analysis_result.get("features_for_model", {}) if isinstance(analysis_result, dict) else {}
@@ -148,39 +249,72 @@ class RiskAgent:
         return self._safe_float(features.get(key, stage2.get(key, default)), default) or default
 
     # ------------------------------------------------------------------
-    # DQN state encoding
+    # State encoding
     # ------------------------------------------------------------------
     def _risk_numeric(self, label: str) -> float:
         label = str(label).lower()
-        return {"low": 0.2, "medium": 0.55, "high": 0.85, "critical": 1.0, "unknown": 0.5}.get(label, 0.5)
+        return {
+            "low": 0.20,
+            "medium": 0.55,
+            "moderate": 0.55,
+            "high": 0.85,
+            "critical": 1.0,
+            "unknown": 0.50,
+        }.get(label, 0.50)
 
-    def _state_vector(self, validation_result: Dict[str, Any], analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> List[float]:
+    def _trend_numeric(self, trend: str) -> float:
+        trend = str(trend).lower()
+        if "strong positive" in trend:
+            return 1.0
+        if "positive" in trend:
+            return 0.65
+        if "strong negative" in trend:
+            return -1.0
+        if "negative" in trend:
+            return -0.65
+        return 0.0
+
+    def _state_vector(
+        self,
+        validation_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        signal_result: Dict[str, Any],
+    ) -> List[float]:
         model_signal = self._model_signal(signal_result)
-        rsi = self._feature_value(analysis_result, "rsi_14", 50.0)
-        return_20 = self._feature_value(analysis_result, "return_20", 0.0)
-        ma_gap = self._feature_value(analysis_result, "ma_gap", 0.0)
-        volatility_20 = self._feature_value(analysis_result, "volatility_20", 0.0)
+        analyst_signal = self._analyst_signal(analysis_result)
         entry_risk = self._entry_risk(analysis_result, signal_result)
         trend = self._trend_direction(analysis_result, signal_result)
         volatility_level = self._volatility_level(analysis_result)
-        analyst_signal = self._analyst_signal(analysis_result)
+
+        rsi = self._feature_value(analysis_result, "rsi_14", 50.0)
+        return_5 = self._feature_value(analysis_result, "return_5", 0.0)
+        return_20 = self._feature_value(analysis_result, "return_20", 0.0)
+        ma_gap = self._feature_value(analysis_result, "ma_gap", 0.0)
+        volatility_20 = self._feature_value(analysis_result, "volatility_20", 0.0)
+
         return [
             self._validation_score(validation_result),
             self._model_confidence(signal_result),
             self._analyst_score(analysis_result),
             self.MODEL_SIGNALS.get(model_signal, 0.0),
-            1.0 if "BULLISH" in analyst_signal or "POSITIVE" in analyst_signal else 0.0,
-            1.0 if "BEARISH" in analyst_signal or "RISK" in analyst_signal else 0.0,
+            1.0 if ("BULLISH" in analyst_signal or "POSITIVE" in analyst_signal) else 0.0,
+            1.0 if ("BEARISH" in analyst_signal or analyst_signal == "SELL_RISK") else 0.0,
             self._risk_numeric(entry_risk),
             self._risk_numeric(volatility_level),
-            1.0 if trend == "Positive" else (-1.0 if trend == "Negative" else 0.0),
+            self._trend_numeric(trend),
             self._clip(rsi / 100.0),
+            max(-1.0, min(1.0, return_5)),
             max(-1.0, min(1.0, return_20)),
-            max(-1.0, min(1.0, ma_gap * 5.0)),
-            self._clip(volatility_20 / 0.08),
+            max(-1.0, min(1.0, ma_gap * 5.0 + volatility_20)),
         ]
 
-    def _state_string(self, symbol: str, validation_result: Dict[str, Any], analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
+    def _state_string(
+        self,
+        symbol: str,
+        validation_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        signal_result: Dict[str, Any],
+    ) -> str:
         parts = {
             "symbol": symbol,
             "validation": self._validation_confidence(validation_result),
@@ -194,125 +328,56 @@ class RiskAgent:
         return "|".join(f"{k}={v}" for k, v in parts.items())
 
     def _parse_state_string_to_vector(self, state: str) -> List[float]:
-        # Used during delayed reward update when only the stored state string is available.
-        data = {}
+        """
+        Compatibility path for delayed RewardAgent updates.
+        It reconstructs a reasonable vector from the stored q_state string.
+        """
+        parsed = {}
         for part in str(state or "").split("|"):
             if "=" in part:
-                k, v = part.split("=", 1)
-                data[k] = v
-        validation = {"confidence": data.get("validation", "Medium")}
-        signal = {"model_signal": data.get("model", "HOLD"), "confidence_level": data.get("model_conf", "Medium"), "prediction_confidence": {"High": 0.75, "Medium": 0.55, "Low": 0.35}.get(data.get("model_conf", "Medium"), 0.55)}
-        analysis = {
-            "analyst_signal": data.get("analyst", "NEUTRAL"),
-            "analyst_score": 0.65 if "BULLISH" in data.get("analyst", "") or "POSITIVE" in data.get("analyst", "") else 0.45,
-            "trend_direction": data.get("trend", "Neutral"),
-            "entry_risk_level": data.get("entry_risk", "Medium"),
-            "volatility_level": data.get("volatility", "Unknown"),
-            "features_for_model": {"rsi_14": 50, "return_20": 0, "ma_gap": 0, "volatility_20": 0.02},
-        }
-        return self._state_vector(validation, analysis, signal)
+                key, value = part.split("=", 1)
+                parsed[key.strip()] = value.strip()
+
+        validation = parsed.get("validation", "Medium").title()
+        model = parsed.get("model", "HOLD").upper()
+        model_conf = parsed.get("model_conf", "Medium").title()
+        analyst = parsed.get("analyst", "NEUTRAL").upper()
+        trend = parsed.get("trend", "Neutral").title()
+        entry_risk = parsed.get("entry_risk", "Medium").title()
+        volatility = parsed.get("volatility", "Unknown").title()
+
+        validation_score = {"High": 1.0, "Medium": 0.72, "Low": 0.40}.get(validation, 0.60)
+        model_conf_score = {"High": 0.80, "Medium": 0.55, "Low": 0.32}.get(model_conf, 0.50)
+        analyst_score = 0.70 if ("BULLISH" in analyst or "POSITIVE" in analyst) else 0.35 if "BEARISH" in analyst else 0.50
+
+        return [
+            validation_score,
+            model_conf_score,
+            analyst_score,
+            self.MODEL_SIGNALS.get(model, 0.0),
+            1.0 if ("BULLISH" in analyst or "POSITIVE" in analyst) else 0.0,
+            1.0 if ("BEARISH" in analyst or analyst == "SELL_RISK") else 0.0,
+            self._risk_numeric(entry_risk),
+            self._risk_numeric(volatility),
+            self._trend_numeric(trend),
+            0.50,
+            0.0,
+            0.0,
+            0.0,
+        ]
 
     # ------------------------------------------------------------------
-    # DQN storage and prediction
-    # ------------------------------------------------------------------
-    def _load_dqn(self) -> None:
-        if not self.dqn_model_path.exists() or self.dqn_model_path.stat().st_size == 0:
-            self.model = None
-            self.scaler = None
-            return
-        try:
-            bundle = joblib.load(self.dqn_model_path)
-            if isinstance(bundle, dict):
-                self.model = bundle.get("model")
-                self.scaler = bundle.get("scaler")
-            else:
-                self.model = None
-                self.scaler = None
-        except Exception:
-            self.model = None
-            self.scaler = None
-
-    def _save_dqn(self) -> None:
-        try:
-            joblib.dump({"model": self.model, "scaler": self.scaler, "actions": self.ACTIONS}, self.dqn_model_path)
-        except Exception:
-            pass
-
-    def _load_replay(self) -> pd.DataFrame:
-        if not self.replay_path.exists() or self.replay_path.stat().st_size == 0:
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(self.replay_path)
-        except Exception:
-            return pd.DataFrame()
-
-    def _append_replay(self, state: str, vector: List[float], action: str, reward: float) -> None:
-        row = {"state": state, "action": action, "reward": float(reward)}
-        for i, value in enumerate(vector):
-            row[f"x{i}"] = float(value)
-        df = self._load_replay()
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df.to_csv(self.replay_path, index=False)
-
-    def _heuristic_q_values(self, vector: List[float]) -> Dict[str, float]:
-        validation_score, model_conf, analyst_score, model_num = vector[0], vector[1], vector[2], vector[3]
-        entry_risk, volatility_risk = vector[6], vector[7]
-        trend = vector[8]
-        keep = 0.15 + 0.25 * validation_score + 0.20 * model_conf + 0.15 * abs(model_num) + 0.10 * max(trend, 0)
-        downgrade = 0.10 + 0.25 * entry_risk + 0.20 * volatility_risk + 0.15 * (1 - model_conf)
-        block = 0.05 + 0.35 * (1 - validation_score) + 0.10 * max(0, model_num)
-        if model_num < 0:
-            keep += 0.15
-        if analyst_score > 0.65 and trend > 0 and entry_risk > 0.65:
-            downgrade += 0.20
-        return {"KEEP_SIGNAL": keep, "DOWNGRADE_TO_HOLD": downgrade, "BLOCK_TRADE": block}
-
-    def _predict_q_values(self, vector: List[float]) -> Dict[str, float]:
-        if self.model is None or self.scaler is None:
-            return self._heuristic_q_values(vector)
-        try:
-            X = self.scaler.transform(pd.DataFrame([vector]))
-            values = self.model.predict(X)[0]
-            return {action: float(values[i]) for i, action in enumerate(self.ACTIONS)}
-        except Exception:
-            return self._heuristic_q_values(vector)
-
-    def _train_dqn_from_replay(self) -> Dict[str, Any]:
-        df = self._load_replay()
-        if df.empty:
-            return {"trained": False, "reason": "No replay samples yet."}
-        feature_cols = [c for c in df.columns if c.startswith("x")]
-        if len(df) < self.min_replay_samples or not feature_cols:
-            return {"trained": False, "reason": f"Need at least {self.min_replay_samples} replay samples."}
-
-        X = df[feature_cols].astype(float)
-        y_rows = []
-        for _, row in df.iterrows():
-            vec = [float(row[c]) for c in feature_cols]
-            target = self._heuristic_q_values(vec)
-            action = str(row.get("action", "KEEP_SIGNAL"))
-            reward = self._safe_float(row.get("reward"), 0.0) or 0.0
-            target[action if action in self.ACTIONS else "KEEP_SIGNAL"] = reward
-            y_rows.append([target[a] for a in self.ACTIONS])
-        y = pd.DataFrame(y_rows, columns=self.ACTIONS)
-        self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(X)
-        self.model = MLPRegressor(hidden_layer_sizes=(16, 8), activation="relu", max_iter=800, random_state=42)
-        self.model.fit(X_scaled, y)
-        self._save_dqn()
-        return {"trained": True, "num_replay_samples": int(len(df)), "model_path": str(self.dqn_model_path)}
-
-    # ------------------------------------------------------------------
-    # Compatibility q-table summary
+    # DQN persistence
     # ------------------------------------------------------------------
     def _load_q_table_compat(self) -> Dict[str, Dict[str, float]]:
-        if not self.q_table_path.exists() or self.q_table_path.stat().st_size == 0:
-            return {}
-        try:
-            data = joblib.load(self.q_table_path)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+        if self.q_table_path.exists() and self.q_table_path.stat().st_size > 0:
+            try:
+                data = joblib.load(self.q_table_path)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                return {}
+        return {}
 
     def _save_q_table_compat(self) -> None:
         try:
@@ -320,24 +385,254 @@ class RiskAgent:
         except Exception:
             pass
 
+    def _load_or_init_dqn(self) -> None:
+        checkpoint_path = self.dqn_model_path
+        if checkpoint_path.exists() and checkpoint_path.stat().st_size > 0:
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.policy_net.load_state_dict(checkpoint.get("policy_state_dict", checkpoint))
+                if "target_state_dict" in checkpoint:
+                    self.target_net.load_state_dict(checkpoint["target_state_dict"])
+                else:
+                    self.target_net.load_state_dict(self.policy_net.state_dict())
+                if "optimizer_state_dict" in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                self.training_steps = int(checkpoint.get("training_steps", 0))
+                self.epsilon = float(checkpoint.get("epsilon", self.epsilon))
+                self.policy_net.eval()
+                self.target_net.eval()
+                return
+            except Exception:
+                pass
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.policy_net.eval()
+        self.target_net.eval()
+
+    def _save_dqn(self) -> None:
+        checkpoint = {
+            "policy_state_dict": self.policy_net.state_dict(),
+            "target_state_dict": self.target_net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "training_steps": self.training_steps,
+            "epsilon": self.epsilon,
+            "state_dim": self.STATE_DIM,
+            "actions": self.ACTIONS,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        torch.save(checkpoint, self.dqn_model_path)
+        torch.save(self.target_net.state_dict(), self.target_model_path)
+
+    # ------------------------------------------------------------------
+    # Replay memory
+    # ------------------------------------------------------------------
+    def _empty_replay_df(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[
+                "created_at_utc",
+                "state_text",
+                "state_vector_json",
+                "action",
+                "action_index",
+                "reward",
+                "next_state_text",
+                "next_state_vector_json",
+                "done",
+            ]
+        )
+
+    def _read_replay(self) -> pd.DataFrame:
+        if not self.replay_path.exists() or self.replay_path.stat().st_size == 0:
+            return self._empty_replay_df()
+        try:
+            df = pd.read_csv(self.replay_path)
+            for col in self._empty_replay_df().columns:
+                if col not in df.columns:
+                    df[col] = None
+            return df
+        except Exception:
+            return self._empty_replay_df()
+
+    def _append_replay(
+        self,
+        state_text: str,
+        state_vector: List[float],
+        action: str,
+        reward: float,
+        next_state_text: Optional[str] = None,
+        next_state_vector: Optional[List[float]] = None,
+        done: bool = True,
+    ) -> int:
+        df = self._read_replay()
+        action = action if action in self.ACTIONS else "KEEP_SIGNAL"
+        next_state_vector = next_state_vector if next_state_vector is not None else state_vector
+        row = {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "state_text": state_text,
+            "state_vector_json": json.dumps([float(x) for x in state_vector]),
+            "action": action,
+            "action_index": self.ACTION_INDEX[action],
+            "reward": float(reward),
+            "next_state_text": next_state_text or "",
+            "next_state_vector_json": json.dumps([float(x) for x in next_state_vector]),
+            "done": bool(done),
+        }
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        df.to_csv(self.replay_path, index=False)
+        return len(df)
+
+    def _sample_replay_batch(self, df: pd.DataFrame) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        if len(df) < self.min_replay_samples:
+            return None
+        sample_size = min(self.batch_size, len(df))
+        batch = df.sample(sample_size, random_state=random.randint(1, 1_000_000))
+
+        states, actions, rewards, next_states, dones = [], [], [], [], []
+        for _, row in batch.iterrows():
+            try:
+                states.append(json.loads(row["state_vector_json"]))
+                actions.append(int(row["action_index"]))
+                rewards.append(float(row["reward"]))
+                next_states.append(json.loads(row["next_state_vector_json"]))
+                dones.append(1.0 if str(row.get("done", "True")).lower() in ["true", "1", "yes"] else 0.0)
+            except Exception:
+                continue
+
+        if not states:
+            return None
+
+        return (
+            torch.tensor(states, dtype=torch.float32, device=self.device),
+            torch.tensor(actions, dtype=torch.long, device=self.device).unsqueeze(1),
+            torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(1),
+            torch.tensor(next_states, dtype=torch.float32, device=self.device),
+            torch.tensor(dones, dtype=torch.float32, device=self.device).unsqueeze(1),
+        )
+
+    # ------------------------------------------------------------------
+    # DQN prediction and training
+    # ------------------------------------------------------------------
+    def _predict_q_values_from_vector(self, vector: List[float]) -> Dict[str, float]:
+        """
+        Strict DQN inference.
+
+        Q-values always come from the PyTorch policy network. There is no
+        hand-written heuristic Q-value fallback. When replay memory is still
+        below min_replay_samples, the network is simply in warm-up state and
+        has not yet been trained from feedback.
+        """
+        self.policy_net.eval()
+        with torch.no_grad():
+            state_tensor = torch.tensor([vector], dtype=torch.float32, device=self.device)
+            q_values = self.policy_net(state_tensor).detach().cpu().numpy()[0].tolist()
+        return {action: float(q_values[idx]) for action, idx in self.ACTION_INDEX.items()}
+
+    def _predict_q_values(
+        self,
+        vector: List[float],
+        validation_result: Optional[Dict[str, Any]] = None,
+        analysis_result: Optional[Dict[str, Any]] = None,
+        signal_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """
+        Return policy-network Q-values for all actions.
+
+        validation_result, analysis_result, and signal_result are accepted for
+        backward compatibility with older code, but they are not used to create
+        manual Q-values. This keeps the risk layer a real DQN implementation.
+        """
+        return self._predict_q_values_from_vector(vector)
+
+    def _choose_dqn_action(self, q_values: Dict[str, float]) -> str:
+        """
+        Epsilon-greedy DQN action selection over the full action space.
+
+        The final safety filter can still block unsafe live paper decisions,
+        but the DQN policy itself follows standard epsilon-greedy selection.
+        """
+        if random.random() < self.epsilon:
+            return random.choice(self.ACTIONS)
+        return max(q_values, key=q_values.get)
+
+    def _train_dqn_from_replay(self) -> Dict[str, Any]:
+        df = self._read_replay()
+        replay_count = len(df)
+        if replay_count < self.min_replay_samples:
+            return {
+                "success": False,
+                "trained": False,
+                "replay_count": replay_count,
+                "min_replay_samples": self.min_replay_samples,
+                "summary": f"DQN not trained yet. Need at least {self.min_replay_samples} replay samples.",
+            }
+
+        losses = []
+        self.policy_net.train()
+        self.target_net.eval()
+
+        for _ in range(self.train_epochs_per_update):
+            batch = self._sample_replay_batch(df)
+            if batch is None:
+                continue
+            states, actions, rewards, next_states, dones = batch
+
+            q_values = self.policy_net(states).gather(1, actions)
+            with torch.no_grad():
+                next_q_values = self.target_net(next_states).max(dim=1, keepdim=True)[0]
+                target_q = rewards + self.gamma * next_q_values * (1.0 - dones)
+
+            loss = self.loss_fn(q_values, target_q)
+            self.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            self.optimizer.step()
+            losses.append(float(loss.detach().cpu().item()))
+            self.training_steps += 1
+
+            if self.training_steps % self.target_update_steps == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        self.policy_net.eval()
+        self.target_net.eval()
+        self._save_dqn()
+
+        return {
+            "success": True,
+            "trained": True,
+            "replay_count": replay_count,
+            "training_steps": self.training_steps,
+            "target_update_steps": self.target_update_steps,
+            "epsilon": round(self.epsilon, 5),
+            "loss": round(sum(losses) / len(losses), 6) if losses else None,
+            "summary": "DQN policy network updated from replay memory.",
+        }
+
     def _record_state_q_values(self, state: str, q_values: Dict[str, float]) -> None:
-        self.q_table[state] = {a: float(q_values.get(a, 0.0)) for a in self.ACTIONS}
+        self.q_table[state] = {action: float(q_values.get(action, 0.0)) for action in self.ACTIONS}
         self._save_q_table_compat()
 
     # ------------------------------------------------------------------
-    # Safety layer and decision combination
+    # Risk decision rules
     # ------------------------------------------------------------------
-    def _hard_safety_action(self, validation_result: Dict[str, Any], analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> Tuple[str, List[str]]:
-        reasons = []
+    def _hard_safety_action(
+        self,
+        validation_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        signal_result: Dict[str, Any],
+    ) -> Tuple[str, List[str]]:
+        model_signal = self._model_signal(signal_result)
         validation_score = self._validation_score(validation_result)
         validation_action = self._validation_action(validation_result)
-        model_signal = self._model_signal(signal_result)
         model_conf = self._model_confidence(signal_result)
         entry_risk = self._entry_risk(analysis_result, signal_result)
         volatility = self._volatility_level(analysis_result)
 
-        if validation_action == "BLOCK_ANALYSIS" or validation_score <= 0.20:
-            reasons.append("data quality is too weak")
+        reasons = []
+        if validation_action == "BLOCK_ANALYSIS":
+            reasons.append("data validation blocked the analysis")
+            return "BLOCK_TRADE", reasons
+        if validation_score < 0.35:
+            reasons.append("data confidence is too weak")
             return "BLOCK_TRADE", reasons
         if model_signal == "BUY_CANDIDATE" and validation_score < 0.50:
             reasons.append("buy signal has weak data support")
@@ -354,17 +649,14 @@ class RiskAgent:
         reasons.append("no hard safety block was triggered")
         return "KEEP_SIGNAL", reasons
 
-    def _choose_dqn_action(self, q_values: Dict[str, float]) -> str:
-        if random.random() < self.epsilon:
-            return random.choice(["KEEP_SIGNAL", "DOWNGRADE_TO_HOLD"])
-        return max(q_values, key=q_values.get)
-
     def _filter_dqn_action(self, dqn_action: str, hard_action: str, model_signal: str) -> str:
         if hard_action == "BLOCK_TRADE":
             return "BLOCK_TRADE"
-        # The DQN cannot create a hard block alone in this educational system.
         if dqn_action == "BLOCK_TRADE":
+            # DQN cannot hard-block by itself in the paper decision-support system.
             return "DOWNGRADE_TO_HOLD" if model_signal == "BUY_CANDIDATE" else "KEEP_SIGNAL"
+        if dqn_action == "DOWNGRADE_TO_HOLD" and model_signal != "BUY_CANDIDATE":
+            return "KEEP_SIGNAL"
         return dqn_action if dqn_action in self.ACTIONS else "KEEP_SIGNAL"
 
     def _combine_actions(self, hard_action: str, dqn_action: str) -> str:
@@ -378,16 +670,25 @@ class RiskAgent:
             return "HOLD"
         return model_signal if model_signal in ["BUY_CANDIDATE", "HOLD", "SELL_RISK"] else "HOLD"
 
-    def _risk_level(self, final_signal: str, validation_result: Dict[str, Any], analysis_result: Dict[str, Any], signal_result: Dict[str, Any], action: str) -> Tuple[str, str]:
-        points = 0
-        notes = []
+    def _risk_level(
+        self,
+        final_signal: str,
+        validation_result: Dict[str, Any],
+        analysis_result: Dict[str, Any],
+        signal_result: Dict[str, Any],
+        action: str,
+    ) -> Tuple[str, str]:
         if action == "BLOCK_TRADE":
             return "Critical", "Data quality or safety rules blocked the result."
+
+        points = 0
+        notes = []
         validation_score = self._validation_score(validation_result)
         model_conf = self._model_confidence(signal_result)
         entry_risk = self._entry_risk(analysis_result, signal_result)
         volatility = self._volatility_level(analysis_result)
         trend = self._trend_direction(analysis_result, signal_result)
+
         if validation_score < 0.55:
             points += 2
             notes.append("data confidence is limited")
@@ -408,6 +709,7 @@ class RiskAgent:
             notes.append("the final signal points to downside risk")
         if trend == "Positive" and entry_risk in ["Medium", "High"] and final_signal == "HOLD":
             notes.append("main risk is chasing after a strong move")
+
         if points >= 5:
             level = "High"
         elif points >= 3:
@@ -419,19 +721,32 @@ class RiskAgent:
     # ------------------------------------------------------------------
     # Main app-compatible method
     # ------------------------------------------------------------------
-    def assess_risk(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def assess_risk(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        validation_result = validation_result or {}
+        analysis_result = analysis_result or {}
+        signal_result = signal_result or {}
+
         symbol = self._get_symbol(signal_result, analysis_result, validation_result)
         model_signal = self._model_signal(signal_result)
         vector = self._state_vector(validation_result, analysis_result, signal_result)
         state = self._state_string(symbol, validation_result, analysis_result, signal_result)
+
         hard_action, hard_reasons = self._hard_safety_action(validation_result, analysis_result, signal_result)
-        q_values = self._predict_q_values(vector)
+        q_values = self._predict_q_values(vector, validation_result, analysis_result, signal_result)
         raw_dqn_action = self._choose_dqn_action(q_values)
         filtered_dqn_action = self._filter_dqn_action(raw_dqn_action, hard_action, model_signal)
         final_action = self._combine_actions(hard_action, filtered_dqn_action)
         final_signal = self._apply_action(model_signal, final_action)
         risk_level, risk_interpretation = self._risk_level(final_signal, validation_result, analysis_result, signal_result, final_action)
         self._record_state_q_values(state, q_values)
+
+        replay_count = len(self._read_replay())
+        dqn_status = "active" if replay_count >= self.min_replay_samples else "warmup"
 
         reasoning_steps = [
             f"Model signal: {model_signal}.",
@@ -440,6 +755,7 @@ class RiskAgent:
             f"Trend direction: {self._trend_direction(analysis_result, signal_result)}.",
             f"Entry timing risk: {self._entry_risk(analysis_result, signal_result)}.",
             f"Hard safety action: {hard_action} ({'; '.join(hard_reasons)}).",
+            f"DQN status: {dqn_status}; replay samples: {replay_count}/{self.min_replay_samples}.",
             f"DQN advisory action: {raw_dqn_action}; after safety filter: {filtered_dqn_action}.",
             f"Final risk action: {final_action}; final signal: {final_signal}.",
         ]
@@ -454,7 +770,7 @@ class RiskAgent:
         return {
             "success": True,
             "agent": "Risk Agent",
-            "agent_goal": "Apply hard safety checks and DQN-style risk control.",
+            "agent_goal": "Apply hard safety checks and strict DQN risk advisory.",
             "symbol": symbol,
             "original_signal": model_signal,
             "risk_action": final_action,
@@ -462,8 +778,26 @@ class RiskAgent:
             "dqn_action": raw_dqn_action,
             "filtered_dqn_action": filtered_dqn_action,
             "dqn_q_values": {k: round(v, 5) for k, v in q_values.items()},
+            "dqn_status": dqn_status,
+            "dqn_framework": "Strict PyTorch DQN with policy network, target network, replay memory, Bellman target, mini-batch updates, and epsilon-greedy action selection",
+            "is_strict_dqn": True,
+            "dqn_algorithm_components": {
+                "policy_network": True,
+                "target_network": True,
+                "replay_memory": True,
+                "bellman_target_update": True,
+                "mini_batch_training": True,
+                "huber_loss": True,
+                "epsilon_greedy": True,
+                "manual_q_value_fallback": False,
+                "hard_safety_guardrail": True
+            },
             "dqn_model_path": str(self.dqn_model_path),
+            "dqn_target_model_path": str(self.target_model_path),
             "dqn_replay_path": str(self.replay_path),
+            "dqn_replay_count": replay_count,
+            "dqn_min_replay_samples": self.min_replay_samples,
+            "epsilon": round(self.epsilon, 5),
             "q_state": state,
             "final_signal": final_signal,
             "risk_level": risk_level,
@@ -479,6 +813,7 @@ class RiskAgent:
                 "risk_level": risk_level,
                 "risk_action": final_action,
                 "dqn_action": filtered_dqn_action,
+                "dqn_status": dqn_status,
                 "risk_interpretation": risk_interpretation,
                 "explanation_for_llm": f"Risk level is {risk_level}. {risk_interpretation}",
             },
@@ -486,19 +821,44 @@ class RiskAgent:
         }
 
     # Aliases expected by app.py
-    def apply_risk_control(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def apply_risk_control(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self.assess_risk(signal_result, analysis_result, validation_result)
 
-    def adjust_risk(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def adjust_risk(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self.assess_risk(signal_result, analysis_result, validation_result)
 
-    def evaluate_risk(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate_risk(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self.assess_risk(signal_result, analysis_result, validation_result)
 
-    def control_risk(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def control_risk(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self.assess_risk(signal_result, analysis_result, validation_result)
 
-    def run(self, signal_result: Dict[str, Any], analysis_result: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+    def run(
+        self,
+        signal_result: Dict[str, Any],
+        analysis_result: Optional[Dict[str, Any]] = None,
+        validation_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return self.assess_risk(signal_result, analysis_result, validation_result)
 
     # ------------------------------------------------------------------
@@ -506,67 +866,95 @@ class RiskAgent:
     # ------------------------------------------------------------------
     def calculate_reward(self, final_signal: str, future_return: float, volatility_level: str = "Unknown") -> float:
         future_return = self._safe_float(future_return, 0.0) or 0.0
-        final_signal = self._normalise_signal(final_signal, "HOLD")
+        final_signal = self._normalise_label(final_signal, "HOLD")
+
         if final_signal == "BUY_CANDIDATE":
             reward = future_return
         elif final_signal == "SELL_RISK":
             reward = -future_return
         elif final_signal == "HOLD":
-            # HOLD is good if it avoids a large move against the signal, but it
-            # should not dominate learning.
             reward = -abs(future_return) * 0.15
         elif final_signal == "BLOCKED":
-            reward = abs(future_return) * 0.3 if future_return < 0 else -future_return * 0.2
+            reward = abs(future_return) * 0.30 if future_return < 0 else -future_return * 0.20
         else:
             reward = 0.0
+
         if str(volatility_level).title() in ["High", "Critical"]:
             reward -= 0.003
         return float(reward)
 
-    def update_q_value(self, state: str, action: str, reward: float, next_state: Optional[str] = None) -> Dict[str, Any]:
-        # The name is kept for app.py/reward_agent compatibility, but the update
-        # now writes DQN replay memory and retrains the small neural Q model.
+    def update_q_value(
+        self,
+        state: str,
+        action: str,
+        reward: float,
+        next_state: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compatibility name for RewardAgent.
+        Under strict DQN, this appends a transition to replay memory and trains
+        the policy network only when enough replay samples exist.
+        """
         if not state:
             return {"success": False, "summary": "Cannot update DQN because state is missing."}
+
         action = action if action in self.ACTIONS else "KEEP_SIGNAL"
         reward = self._safe_float(reward, 0.0) or 0.0
-        vector = self._parse_state_string_to_vector(state)
-        old_q = self._predict_q_values(vector).get(action, 0.0)
-        self._append_replay(state, vector, action, reward)
+        state_vector = self._parse_state_string_to_vector(state)
+        next_state_vector = self._parse_state_string_to_vector(next_state) if next_state else state_vector
+
+        old_q = self._predict_q_values_from_vector(state_vector).get(action, 0.0)
+        replay_count = self._append_replay(
+            state_text=state,
+            state_vector=state_vector,
+            action=action,
+            reward=reward,
+            next_state_text=next_state,
+            next_state_vector=next_state_vector,
+            done=next_state is None,
+        )
         train_result = self._train_dqn_from_replay()
-        new_q = self._predict_q_values(vector).get(action, old_q)
-        q_values = self._predict_q_values(vector)
+        new_q = self._predict_q_values_from_vector(state_vector).get(action, old_q)
+        q_values = self._predict_q_values(state_vector)
         self._record_state_q_values(state, q_values)
+
         return {
             "success": True,
-            "learning_type": "DQN-style replay update",
+            "learning_type": "strict_pytorch_dqn_replay_update",
             "state": state,
             "action": action,
             "reward": round(reward, 6),
             "old_q": round(old_q, 6),
             "new_q": round(new_q, 6),
+            "replay_count": replay_count,
+            "min_replay_samples": self.min_replay_samples,
             "dqn_model_path": str(self.dqn_model_path),
+            "dqn_target_model_path": str(self.target_model_path),
             "dqn_replay_path": str(self.replay_path),
             "train_result": train_result,
-            "summary": "Updated the DQN replay memory and refreshed the risk advisory model when enough samples were available.",
+            "summary": "Added feedback to DQN replay memory and trained the policy network when enough samples were available.",
         }
 
     def update_from_feedback(self, risk_result: Dict[str, Any], future_return: float) -> Dict[str, Any]:
         if not isinstance(risk_result, dict):
             return {"success": False, "summary": "Cannot update DQN because risk_result is invalid."}
+
         final_signal = risk_result.get("final_signal")
         risk_level = risk_result.get("risk_level")
         volatility = risk_result.get("volatility_level") or ("High" if risk_level in ["High", "Critical"] else "Low")
         reward = self.calculate_reward(final_signal, future_return, volatility)
+
         result = self.update_q_value(
             state=risk_result.get("q_state"),
             action=risk_result.get("risk_action"),
             reward=reward,
         )
-        result.update({
-            "final_signal": final_signal,
-            "risk_level": risk_level,
-            "future_return": self._safe_float(future_return, 0.0),
-            "calculated_reward": round(reward, 6),
-        })
+        result.update(
+            {
+                "final_signal": final_signal,
+                "risk_level": risk_level,
+                "future_return": self._safe_float(future_return, 0.0),
+                "calculated_reward": round(reward, 6),
+            }
+        )
         return result

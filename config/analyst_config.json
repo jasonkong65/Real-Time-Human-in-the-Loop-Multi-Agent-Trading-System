@@ -1,0 +1,76 @@
+{
+  "score_weights": {
+    "quote_score_weight": 0.35,
+    "historical_score_weight": 0.65,
+    "market_regime_adjustment_weight": 0.05,
+    "sector_trend_adjustment_weight": 0.04
+  },
+  "quote_scoring": {
+    "strong_up_return": 0.02,
+    "mild_up_return": 0.005,
+    "strong_down_return": -0.02,
+    "mild_down_return": -0.005,
+    "open_up_return": 0.01,
+    "open_down_return": -0.01,
+    "high_intraday_range": 0.04,
+    "medium_intraday_range": 0.02
+  },
+  "historical_scoring": {
+    "strong_return_20": 0.08,
+    "positive_return_20": 0.02,
+    "weak_return_20": -0.05,
+    "slightly_negative_return_20": -0.02,
+    "positive_return_5": 0.02,
+    "negative_return_5": -0.02,
+    "uptrend_ma_gap": 0.02,
+    "downtrend_ma_gap": -0.02,
+    "high_volatility_20": 0.04,
+    "medium_volatility_20": 0.02,
+    "overbought_rsi": 70,
+    "strong_overbought_rsi": 78,
+    "oversold_rsi": 30,
+    "near_high_distance": 0.03,
+    "stretched_return_20": 0.12,
+    "high_volume_change": 0.2,
+    "low_volume_change": -0.2
+  },
+  "signal_thresholds": {
+    "bullish_score": 0.70,
+    "bearish_score": 0.35,
+    "watchlist_positive_score": 0.60,
+    "entry_risk_score": 2
+  },
+  "market_context": {
+    "enabled": true,
+    "cache_ttl_hours": 6,
+    "benchmark_symbol": "SPY",
+    "period": "3mo",
+    "interval": "1d"
+  },
+  "sector_etf_map": {
+    "AAPL": "XLK",
+    "MSFT": "XLK",
+    "NVDA": "XLK",
+    "AMD": "XLK",
+    "INTC": "XLK",
+    "QCOM": "XLK",
+    "AVGO": "XLK",
+    "GOOGL": "XLC",
+    "META": "XLC",
+    "NFLX": "XLC",
+    "DIS": "XLC",
+    "AMZN": "XLY",
+    "TSLA": "XLY",
+    "HD": "XLY",
+    "MCD": "XLY",
+    "JPM": "XLF",
+    "BAC": "XLF",
+    "V": "XLF",
+    "MA": "XLF",
+    "UNH": "XLV",
+    "WMT": "XLP",
+    "COST": "XLP",
+    "PEP": "XLP",
+    "KO": "XLP"
+  }
+}

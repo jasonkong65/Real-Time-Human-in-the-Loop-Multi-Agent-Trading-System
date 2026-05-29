@@ -1,0 +1,20 @@
+{
+  "algorithm": "strict_pytorch_dqn",
+  "state_dim": 13,
+  "actions": [
+    "KEEP_SIGNAL",
+    "DOWNGRADE_TO_HOLD",
+    "BLOCK_TRADE"
+  ],
+  "gamma": 0.9,
+  "learning_rate": 0.001,
+  "batch_size": 32,
+  "min_replay_samples": 100,
+  "target_update_steps": 25,
+  "train_epochs_per_update": 4,
+  "epsilon_start": 0.08,
+  "epsilon_min": 0.02,
+  "epsilon_decay": 0.995,
+  "loss": "SmoothL1Loss/Huber",
+  "safety_design": "DQN is advisory. Hard safety rules remain final guardrail. DQN cannot independently create BLOCK_TRADE unless hard safety triggered block."
+}

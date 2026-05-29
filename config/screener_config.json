@@ -1,0 +1,22 @@
+{
+  "min_history_rows": 60,
+  "min_avg_dollar_volume": 10000000,
+  "min_market_cap": 0,
+  "max_per_sector": 2,
+  "candidate_queue_size": 3,
+  "weights": {
+    "momentum": 0.30,
+    "trend": 0.25,
+    "volatility": 0.18,
+    "rsi": 0.15,
+    "liquidity": 0.07,
+    "volume": 0.05
+  },
+  "risk_weights": {
+    "negative_momentum": 0.32,
+    "downtrend": 0.25,
+    "volatility": 0.23,
+    "rsi_extreme": 0.13,
+    "liquidity": 0.07
+  }
+}
