@@ -14,3 +14,4 @@ data/cache/
 data/historical/*.parquet
 data/historical/metadata/
 docs/
+ui_sessions/
