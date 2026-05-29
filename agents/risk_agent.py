@@ -1,6 +1,7 @@
 import json
 import math
 import random
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,6 +67,38 @@ class RiskAgent:
 
     STATE_DIM = 13
 
+
+    def _load_runtime_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Load optional DQN/risk settings from config/risk_config.json.
+        This keeps the agent usable without manual code edits while preserving
+        backward-compatible constructor arguments.
+        """
+        candidate_paths = []
+        if config_path:
+            candidate_paths.append(Path(config_path))
+        candidate_paths.append(Path("config/risk_config.json"))
+
+        for path in candidate_paths:
+            try:
+                if path.exists() and path.stat().st_size > 0:
+                    with path.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+            except Exception:
+                continue
+        return {}
+
+    def _cfg(self, config: Dict[str, Any], key: str, default: Any) -> Any:
+        """Read one config value from either the top level or the dqn section."""
+        try:
+            if key in config:
+                return config[key]
+            dqn = config.get("dqn", {}) if isinstance(config, dict) else {}
+            return dqn.get(key, default) if isinstance(dqn, dict) else default
+        except Exception:
+            return default
+
     def __init__(
         self,
         dqn_model_path: str = "models/risk_dqn_model.pt",
@@ -83,16 +116,36 @@ class RiskAgent:
         train_epochs_per_update: int = 4,
         hidden_dim: int = 64,
         seed: int = 42,
+        config_path: Optional[str] = "config/risk_config.json",
+        replay_db_path: str = "data/trading_system.db",
     ):
+        config = self._load_runtime_config(config_path)
+        epsilon = float(self._cfg(config, "epsilon", epsilon))
+        epsilon_min = float(self._cfg(config, "epsilon_min", epsilon_min))
+        epsilon_decay = float(self._cfg(config, "epsilon_decay", epsilon_decay))
+        gamma = float(self._cfg(config, "gamma", gamma))
+        learning_rate = float(self._cfg(config, "learning_rate", learning_rate))
+        batch_size = int(self._cfg(config, "batch_size", batch_size))
+        min_replay_samples = int(self._cfg(config, "min_replay_samples", min_replay_samples))
+        target_update_steps = int(self._cfg(config, "target_update_steps", target_update_steps))
+        train_epochs_per_update = int(self._cfg(config, "train_epochs_per_update", train_epochs_per_update))
+        hidden_dim = int(self._cfg(config, "hidden_dim", hidden_dim))
+        replay_db_path = str(self._cfg(config, "replay_db_path", replay_db_path))
+
         self.dqn_model_path = Path(dqn_model_path)
         self.target_model_path = Path(target_model_path)
         self.replay_path = Path(replay_path)
         self.q_table_path = Path(q_table_path)  # compatibility for older app/evaluator wording
+        self.replay_db_path = Path(replay_db_path)
 
         self.dqn_model_path.parent.mkdir(parents=True, exist_ok=True)
         self.target_model_path.parent.mkdir(parents=True, exist_ok=True)
         self.replay_path.parent.mkdir(parents=True, exist_ok=True)
         self.q_table_path.parent.mkdir(parents=True, exist_ok=True)
+        self.replay_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.loss_history_path = Path("data/risk_dqn_loss_history.csv")
+        self.loss_history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.last_training_loss: Optional[float] = None
 
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
@@ -117,6 +170,7 @@ class RiskAgent:
         self.training_steps = 0
 
         self.q_table = self._load_q_table_compat()
+        self._init_replay_db()
         self._load_or_init_dqn()
 
     # ------------------------------------------------------------------
@@ -425,6 +479,89 @@ class RiskAgent:
     # ------------------------------------------------------------------
     # Replay memory
     # ------------------------------------------------------------------
+    def _init_replay_db(self) -> None:
+        """Create the SQLite replay-memory table used as the primary DQN memory."""
+        try:
+            with sqlite3.connect(self.replay_db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS risk_dqn_replay (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at_utc TEXT,
+                        state_text TEXT,
+                        state_vector_json TEXT,
+                        action TEXT,
+                        action_index INTEGER,
+                        reward REAL,
+                        next_state_text TEXT,
+                        next_state_vector_json TEXT,
+                        done INTEGER,
+                        source TEXT DEFAULT 'risk_agent'
+                    )
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_time ON risk_dqn_replay(created_at_utc)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_action ON risk_dqn_replay(action)")
+        except Exception:
+            # CSV replay remains as a compatibility fallback.
+            pass
+
+    def _read_replay_from_sqlite(self) -> pd.DataFrame:
+        try:
+            if not self.replay_db_path.exists() or self.replay_db_path.stat().st_size == 0:
+                return self._empty_replay_df()
+            with sqlite3.connect(self.replay_db_path) as conn:
+                table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='risk_dqn_replay'"
+                ).fetchone()
+                if table is None:
+                    return self._empty_replay_df()
+                df = pd.read_sql_query(
+                    """
+                    SELECT created_at_utc, state_text, state_vector_json,
+                           action, action_index, reward, next_state_text,
+                           next_state_vector_json, done
+                    FROM risk_dqn_replay
+                    ORDER BY id ASC
+                    """,
+                    conn,
+                )
+            for col in self._empty_replay_df().columns:
+                if col not in df.columns:
+                    df[col] = None
+            return df
+        except Exception:
+            return self._empty_replay_df()
+
+    def _append_replay_to_sqlite(self, row: Dict[str, Any]) -> bool:
+        try:
+            self._init_replay_db()
+            with sqlite3.connect(self.replay_db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO risk_dqn_replay (
+                        created_at_utc, state_text, state_vector_json,
+                        action, action_index, reward, next_state_text,
+                        next_state_vector_json, done, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row.get("created_at_utc"),
+                        row.get("state_text"),
+                        row.get("state_vector_json"),
+                        row.get("action"),
+                        int(row.get("action_index", 0)),
+                        float(row.get("reward", 0.0)),
+                        row.get("next_state_text"),
+                        row.get("next_state_vector_json"),
+                        1 if row.get("done") else 0,
+                        "risk_agent",
+                    ),
+                )
+            return True
+        except Exception:
+            return False
+
     def _empty_replay_df(self) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
@@ -441,6 +578,14 @@ class RiskAgent:
         )
 
     def _read_replay(self) -> pd.DataFrame:
+        """
+        Read replay memory from SQLite first, then fall back to CSV.
+        CSV is kept as a mirror for compatibility with old dashboards.
+        """
+        sqlite_df = self._read_replay_from_sqlite()
+        if not sqlite_df.empty:
+            return sqlite_df
+
         if not self.replay_path.exists() or self.replay_path.stat().st_size == 0:
             return self._empty_replay_df()
         try:
@@ -462,7 +607,6 @@ class RiskAgent:
         next_state_vector: Optional[List[float]] = None,
         done: bool = True,
     ) -> int:
-        df = self._read_replay()
         action = action if action in self.ACTIONS else "KEEP_SIGNAL"
         next_state_vector = next_state_vector if next_state_vector is not None else state_vector
         row = {
@@ -476,8 +620,15 @@ class RiskAgent:
             "next_state_vector_json": json.dumps([float(x) for x in next_state_vector]),
             "done": bool(done),
         }
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df.to_csv(self.replay_path, index=False)
+
+        # SQLite is the primary replay memory. CSV is only a compatibility mirror.
+        self._append_replay_to_sqlite(row)
+        df = self._read_replay()
+        try:
+            csv_df = df.copy()
+            csv_df.to_csv(self.replay_path, index=False)
+        except Exception:
+            pass
         return len(df)
 
     def _sample_replay_batch(self, df: pd.DataFrame) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -511,14 +662,16 @@ class RiskAgent:
     # ------------------------------------------------------------------
     # DQN prediction and training
     # ------------------------------------------------------------------
+    # No heuristic Q-value fallback is used. All advisory Q-values come from the PyTorch policy network.
+
     def _predict_q_values_from_vector(self, vector: List[float]) -> Dict[str, float]:
         """
         Strict DQN inference.
 
-        Q-values always come from the PyTorch policy network. There is no
-        hand-written heuristic Q-value fallback. When replay memory is still
-        below min_replay_samples, the network is simply in warm-up state and
-        has not yet been trained from feedback.
+        Q-values are always produced by the PyTorch policy network.
+        We do not use hand-written heuristic Q-values during warm-up.
+        If replay memory is still small, the network is simply untrained/warm-up,
+        and the hard safety layer remains the final guardrail.
         """
         self.policy_net.eval()
         with torch.no_grad():
@@ -533,24 +686,13 @@ class RiskAgent:
         analysis_result: Optional[Dict[str, Any]] = None,
         signal_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
-        """
-        Return policy-network Q-values for all actions.
-
-        validation_result, analysis_result, and signal_result are accepted for
-        backward compatibility with older code, but they are not used to create
-        manual Q-values. This keeps the risk layer a real DQN implementation.
-        """
+        # Keep unused compatibility parameters so old app.py calls still work.
         return self._predict_q_values_from_vector(vector)
 
     def _choose_dqn_action(self, q_values: Dict[str, float]) -> str:
-        """
-        Epsilon-greedy DQN action selection over the full action space.
-
-        The final safety filter can still block unsafe live paper decisions,
-        but the DQN policy itself follows standard epsilon-greedy selection.
-        """
         if random.random() < self.epsilon:
-            return random.choice(self.ACTIONS)
+            # Do not randomly explore BLOCK_TRADE in live paper decision mode.
+            return random.choice(["KEEP_SIGNAL", "DOWNGRADE_TO_HOLD"])
         return max(q_values, key=q_values.get)
 
     def _train_dqn_from_replay(self) -> Dict[str, Any]:
@@ -596,6 +738,10 @@ class RiskAgent:
         self.target_net.eval()
         self._save_dqn()
 
+        avg_loss = round(sum(losses) / len(losses), 6) if losses else None
+        self.last_training_loss = avg_loss
+        self._record_training_loss(avg_loss, replay_count)
+
         return {
             "success": True,
             "trained": True,
@@ -603,9 +749,44 @@ class RiskAgent:
             "training_steps": self.training_steps,
             "target_update_steps": self.target_update_steps,
             "epsilon": round(self.epsilon, 5),
-            "loss": round(sum(losses) / len(losses), 6) if losses else None,
+            "loss": avg_loss,
+            "recent_loss": avg_loss,
             "summary": "DQN policy network updated from replay memory.",
         }
+
+
+    def _record_training_loss(self, loss_value: Optional[float], replay_count: int) -> None:
+        """Keep a lightweight local loss log for diagnostics."""
+        if loss_value is None:
+            return
+        row = {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "loss": float(loss_value),
+            "replay_count": int(replay_count),
+            "training_steps": int(self.training_steps),
+            "epsilon": float(self.epsilon),
+        }
+        try:
+            df = pd.DataFrame([row])
+            if self.loss_history_path.exists() and self.loss_history_path.stat().st_size > 0:
+                old_df = pd.read_csv(self.loss_history_path)
+                df = pd.concat([old_df, df], ignore_index=True).tail(1000)
+            df.to_csv(self.loss_history_path, index=False)
+        except Exception:
+            pass
+
+    def _recent_loss(self) -> Optional[float]:
+        if self.last_training_loss is not None:
+            return float(self.last_training_loss)
+        try:
+            if not self.loss_history_path.exists() or self.loss_history_path.stat().st_size == 0:
+                return None
+            df = pd.read_csv(self.loss_history_path)
+            if df.empty or "loss" not in df.columns:
+                return None
+            return float(df["loss"].dropna().iloc[-1])
+        except Exception:
+            return None
 
     def _record_state_q_values(self, state: str, q_values: Dict[str, float]) -> None:
         self.q_table[state] = {action: float(q_values.get(action, 0.0)) for action in self.ACTIONS}
@@ -779,25 +960,27 @@ class RiskAgent:
             "filtered_dqn_action": filtered_dqn_action,
             "dqn_q_values": {k: round(v, 5) for k, v in q_values.items()},
             "dqn_status": dqn_status,
-            "dqn_framework": "Strict PyTorch DQN with policy network, target network, replay memory, Bellman target, mini-batch updates, and epsilon-greedy action selection",
-            "is_strict_dqn": True,
-            "dqn_algorithm_components": {
-                "policy_network": True,
-                "target_network": True,
-                "replay_memory": True,
-                "bellman_target_update": True,
-                "mini_batch_training": True,
-                "huber_loss": True,
-                "epsilon_greedy": True,
-                "manual_q_value_fallback": False,
-                "hard_safety_guardrail": True
-            },
+            "dqn_framework": "PyTorch DQN with replay memory and target network",
             "dqn_model_path": str(self.dqn_model_path),
             "dqn_target_model_path": str(self.target_model_path),
             "dqn_replay_path": str(self.replay_path),
+            "dqn_replay_db_path": str(self.replay_db_path),
+            "dqn_replay_storage": "sqlite_primary_csv_mirror",
             "dqn_replay_count": replay_count,
             "dqn_min_replay_samples": self.min_replay_samples,
             "epsilon": round(self.epsilon, 5),
+            "recent_dqn_loss": self._recent_loss(),
+            "dqn_training_ready": replay_count >= self.min_replay_samples,
+            "dqn_diagnostics": {
+                "q_values": {k: round(v, 5) for k, v in q_values.items()},
+                "epsilon": round(self.epsilon, 5),
+                "replay_count": replay_count,
+                "min_replay_samples": self.min_replay_samples,
+                "recent_loss": self._recent_loss(),
+                "training_steps": self.training_steps,
+                "target_update_steps": self.target_update_steps,
+                "status": dqn_status,
+            },
             "q_state": state,
             "final_signal": final_signal,
             "risk_level": risk_level,
@@ -931,6 +1114,8 @@ class RiskAgent:
             "dqn_model_path": str(self.dqn_model_path),
             "dqn_target_model_path": str(self.target_model_path),
             "dqn_replay_path": str(self.replay_path),
+            "dqn_replay_db_path": str(self.replay_db_path),
+            "dqn_replay_storage": "sqlite_primary_csv_mirror",
             "train_result": train_result,
             "summary": "Added feedback to DQN replay memory and trained the policy network when enough samples were available.",
         }

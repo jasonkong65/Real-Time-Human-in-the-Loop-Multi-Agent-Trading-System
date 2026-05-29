@@ -2,6 +2,7 @@ import json
 import os
 import random
 import time
+import uuid
 import sqlite3
 from datetime import datetime, date, time as dt_time, timezone
 from pathlib import Path
@@ -369,6 +370,38 @@ class DataAgent:
     # ------------------------------------------------------------------
     # Storage helpers
     # ------------------------------------------------------------------
+    def _source_health_path(self) -> Path:
+        return Path("data/source_health.json")
+
+    def _record_source_health(self, source: str, success: bool, error: Optional[str] = None) -> None:
+        try:
+            path = self._source_health_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+            if path.exists() and path.stat().st_size > 0:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            row = data.get(source, {"success": 0, "failure": 0, "recent_errors": []})
+            if success:
+                row["success"] = int(row.get("success", 0)) + 1
+            else:
+                row["failure"] = int(row.get("failure", 0)) + 1
+                errors = row.get("recent_errors", [])
+                errors.append({"time": self._utc_now_iso(), "error": str(error)[:200]})
+                row["recent_errors"] = errors[-10:]
+            data[source] = row
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _source_health_summary(self) -> Dict[str, Any]:
+        try:
+            path = self._source_health_path()
+            if path.exists() and path.stat().st_size > 0:
+                return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
     def _get_storage_agent(self):
         if not self.storage_enabled:
             return None
@@ -668,7 +701,9 @@ class DataAgent:
             "agent": "Data Agent",
             "agent_goal": "Collect live quote data, track source freshness, and standardise data for downstream agents.",
             "symbol": symbol,
+            "request_id": request_id,
             "market_status": market_status,
+            "source_health": self._source_health_summary(),
             "available_sources": available_sources,
             "selected_price": selected_price,
             "selected_source": selected_source,

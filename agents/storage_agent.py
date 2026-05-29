@@ -133,6 +133,13 @@ class StorageAgent:
         """Create and migrate all tables."""
         schema = [
             """
+            CREATE TABLE IF NOT EXISTS schema_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at_utc TEXT
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS pipeline_runs (
                 run_id TEXT PRIMARY KEY,
                 symbol TEXT,
@@ -298,6 +305,13 @@ class StorageAgent:
                 conn.execute(statement)
 
         # Safe migrations for users with an older db.
+        try:
+            self._execute(
+                "INSERT OR REPLACE INTO schema_metadata (key, value, updated_at_utc) VALUES (?, ?, ?)",
+                ("schema_version", "2026-05-agent-memory-v2", self._now_utc()),
+            )
+        except Exception:
+            pass
         self._add_column_if_missing("reward_updates", "horizon_label", "TEXT")
         self._add_column_if_missing("reward_updates", "status", "TEXT")
 
@@ -1076,6 +1090,17 @@ class StorageAgent:
             "recent_screener_runs": self.get_recent_screener_runs(limit=20),
             "dqn_replay_memory": self.get_dqn_replay_memory(limit=limit),
             "storage_summary": self.get_storage_summary(),
+        }
+
+    def cleanup_old_records(self, days: int = 365) -> Dict[str, Any]:
+        """Best-effort cleanup for very old high-volume records."""
+        cutoff = datetime.utcnow().timestamp() - int(days) * 86400
+        # Timestamps are stored as text in this coursework prototype; keep cleanup conservative.
+        return {
+            "success": True,
+            "cleaned": False,
+            "days": days,
+            "summary": "Cleanup hook is available. No rows are removed automatically in the coursework-safe default mode.",
         }
 
     def get_storage_summary(self) -> Dict[str, Any]:

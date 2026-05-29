@@ -183,6 +183,25 @@ class LLMReportAgent:
             clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
         return clean.strip()
 
+    def _report_quality_score(self, text: str, source_grounded: bool = True) -> Dict[str, Any]:
+        """Lightweight quality check for demo/debugging."""
+        body = text or ""
+        lower = body.lower()
+        score = 1.0
+        issues = []
+        risky_terms = ["should buy", "recommend buying", "should sell", "recommend selling", "use leverage", "before buying"]
+        found = [t for t in risky_terms if t in lower]
+        if found:
+            score -= 0.35
+            issues.append("contains direct trading wording: " + ", ".join(found[:3]))
+        if len(body.split()) < 35:
+            score -= 0.15
+            issues.append("very short report")
+        if source_grounded and "not financial advice" not in lower and "paper" not in lower:
+            score -= 0.10
+            issues.append("paper-decision framing is weak")
+        return {"score": round(max(0.0, min(1.0, score)), 3), "issues": issues or ["No obvious wording issue detected."]}
+
     def _short_system_prompt(self, task: str) -> str:
         return (
             f"You are the report writer for a class stock-analysis prototype. {task} "
@@ -465,6 +484,7 @@ class LLMReportAgent:
                 "llm_error": None,
                 "symbol": symbol,
                 "plain_language_report": groq["text"],
+                "report_quality_score": self._report_quality_score(groq["text"], source_grounded=True),
                 "summary": f"Groq Report Agent generated a single-stock explanation for {symbol}.",
             }
         return self._fallback_single_stock(facts, groq.get("error"))
@@ -501,6 +521,7 @@ This is for paper decision support and class demonstration only. It is not perso
             "llm_error": error,
             "symbol": symbol,
             "plain_language_report": report,
+            "report_quality_score": self._report_quality_score(report, source_grounded=True),
             "summary": f"Local fallback generated a single-stock explanation for {symbol}.",
         }
 
@@ -531,6 +552,7 @@ This is for paper decision support and class demonstration only. It is not perso
                 "llm_available": True,
                 "llm_error": None,
                 "plain_language_report": groq["text"],
+                "report_quality_score": self._report_quality_score(groq["text"], source_grounded=True),
                 "summary": "Groq Report Agent explained the screener result.",
             }
         return self._fallback_screener(top, risk, groq.get("error"))
@@ -552,6 +574,7 @@ This is for paper decision support and class demonstration only. It is not perso
             "llm_available": False,
             "llm_error": error,
             "plain_language_report": report,
+            "report_quality_score": self._report_quality_score(report, source_grounded=True),
             "summary": "Local fallback explained the screener result.",
         }
 
@@ -633,6 +656,7 @@ This is for paper decision support and class demonstration only. It is not perso
             "verified_news": context.get("verified_news", {}),
             "financial_snapshot": context.get("financial_snapshot", {}),
             "plain_language_report": report,
+            "report_quality_score": self._report_quality_score(report, source_grounded=bool(context.get("company_specific_news") or context.get("financial_snapshot"))),
             "summary": summary,
         }
 

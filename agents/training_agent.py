@@ -537,6 +537,63 @@ class TrainingAgent:
     # ------------------------------------------------------------------
     # Training and model management
     # ------------------------------------------------------------------
+    def _feature_snapshot(self, X: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+        """Small feature-distribution snapshot for drift checks."""
+        snapshot: Dict[str, Dict[str, float]] = {}
+        try:
+            for col in self.feature_columns:
+                if col in X.columns:
+                    series = pd.to_numeric(X[col], errors="coerce").dropna()
+                    if not series.empty:
+                        snapshot[col] = {
+                            "mean": float(series.mean()),
+                            "std": float(series.std(ddof=0)),
+                        }
+        except Exception:
+            return {}
+        return snapshot
+
+    def _feature_drift_report(self, existing_bundle: Optional[Dict[str, Any]], current_snapshot: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+        """Compare current feature snapshot with the previous saved model snapshot."""
+        previous = {}
+        if isinstance(existing_bundle, dict):
+            previous = existing_bundle.get("feature_snapshot") or existing_bundle.get("training_feature_snapshot") or {}
+        rows = []
+        max_abs_z = 0.0
+        for feature, cur in current_snapshot.items():
+            old = previous.get(feature, {}) if isinstance(previous, dict) else {}
+            old_mean = old.get("mean")
+            old_std = old.get("std") or 0.0
+            cur_mean = cur.get("mean")
+            if old_mean is None or cur_mean is None:
+                continue
+            denom = max(abs(float(old_std)), 1e-6)
+            z = float(cur_mean - old_mean) / denom
+            max_abs_z = max(max_abs_z, abs(z))
+            rows.append({
+                "feature": feature,
+                "previous_mean": round(float(old_mean), 6),
+                "current_mean": round(float(cur_mean), 6),
+                "z_like_shift": round(z, 4),
+            })
+        if not rows:
+            label = "No baseline"
+        elif max_abs_z >= 2.0:
+            label = "High"
+        elif max_abs_z >= 1.0:
+            label = "Medium"
+        else:
+            label = "Low"
+        return {"drift_level": label, "max_abs_z_like_shift": round(max_abs_z, 4), "details": rows[:10]}
+
+    def _record_training_run_to_storage(self, symbol: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Best-effort SQLite logging; training should never fail because storage failed."""
+        try:
+            from agents.storage_agent import StorageAgent
+            return StorageAgent().record_training_run(run_id=None, symbol=symbol, training_result=result)
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "summary": "Training result was not written to SQLite."}
+
     def _auto_train(
         self,
         historical_data: Dict[str, Any],
@@ -547,6 +604,8 @@ class TrainingAgent:
     ) -> Dict[str, Any]:
         symbol_clean = str(symbol or historical_data.get("symbol", "UNKNOWN")).upper().strip()
         X_current, y_current, data_info = self._build_single_dataset(historical_data, validation_confidence_score)
+        current_feature_snapshot = self._feature_snapshot(X_current)
+        feature_drift = self._feature_drift_report(existing_bundle, current_feature_snapshot)
         X_pool, y_pool, pooled_info = self._load_pooled_local_datasets(symbol_clean, validation_confidence_score)
         pooled_available = X_pool is not None and y_pool is not None and len(X_pool) >= 80
 
@@ -625,6 +684,8 @@ class TrainingAgent:
             "label_distribution": data_info["label_distribution"],
             "pooled_data_info": pooled_info,
             "feature_importance": feature_importance,
+            "feature_snapshot": current_feature_snapshot,
+            "feature_drift": feature_drift,
         }
 
         if should_save:
@@ -674,6 +735,13 @@ class TrainingAgent:
             "confusion_matrix": best_score["confusion_matrix"],
             "classification_report": best_score["classification_report"],
             "feature_importance": feature_importance,
+            "feature_drift": feature_drift,
+            "feature_snapshot": current_feature_snapshot,
+            "model_comparison_reason": (
+                "New model saved because no comparable model existed or the score improved enough."
+                if should_save
+                else "Existing model kept because the new model did not exceed the saved score by the minimum improvement threshold."
+            ),
             "agent_decision": (
                 "A new model was saved after automatic comparison."
                 if should_save
@@ -685,6 +753,7 @@ class TrainingAgent:
                 else f"Training Agent tested new models for {symbol_clean}, but kept the existing model."
             ),
         }
+        result["storage_result"] = self._record_training_run_to_storage(symbol_clean, result)
         return result
 
     def _load_model(self) -> Optional[Dict[str, Any]]:
