@@ -1,0 +1,164 @@
+{
+  "finnhub:AAPL": {
+    "cached_at": 1780015799.0080547,
+    "payload": {
+      "source": "Finnhub",
+      "success": true,
+      "symbol": "AAPL",
+      "current_price": 312.51,
+      "open_price": 310.68,
+      "high_price": 312.8,
+      "low_price": 309.57,
+      "previous_close": 310.85,
+      "timestamp": 1779998400,
+      "raw_response": {
+        "c": 312.51,
+        "d": 1.66,
+        "dp": 0.534,
+        "h": 312.8,
+        "l": 309.57,
+        "o": 310.68,
+        "pc": 310.85,
+        "t": 1779998400
+      },
+      "from_cache": false
+    }
+  },
+  "alpha_vantage:AAPL": {
+    "cached_at": 1780015799.992846,
+    "payload": {
+      "source": "Alpha Vantage",
+      "success": true,
+      "symbol": "AAPL",
+      "current_price": 312.51,
+      "open_price": 310.68,
+      "high_price": 312.8,
+      "low_price": 309.57,
+      "previous_close": 310.85,
+      "latest_trading_day": "2026-05-28",
+      "raw_response": {
+        "Global Quote": {
+          "01. symbol": "AAPL",
+          "02. open": "310.6800",
+          "03. high": "312.8000",
+          "04. low": "309.5700",
+          "05. price": "312.5100",
+          "06. volume": "47261600",
+          "07. latest trading day": "2026-05-28",
+          "08. previous close": "310.8500",
+          "09. change": "1.6600",
+          "10. change percent": "0.5340%"
+        }
+      },
+      "from_cache": false
+    }
+  },
+  "finnhub:MSFT": {
+    "cached_at": 1780016248.6582508,
+    "payload": {
+      "source": "Finnhub",
+      "success": true,
+      "symbol": "MSFT",
+      "current_price": 426.99,
+      "open_price": 412.975,
+      "high_price": 429.49,
+      "low_price": 412.67,
+      "previous_close": 412.67,
+      "timestamp": 1779998400,
+      "raw_response": {
+        "c": 426.99,
+        "d": 14.32,
+        "dp": 3.4701,
+        "h": 429.49,
+        "l": 412.67,
+        "o": 412.975,
+        "pc": 412.67,
+        "t": 1779998400
+      },
+      "from_cache": false
+    }
+  },
+  "alpha_vantage:MSFT": {
+    "cached_at": 1780016249.0581412,
+    "payload": {
+      "source": "Alpha Vantage",
+      "success": true,
+      "symbol": "MSFT",
+      "current_price": 426.99,
+      "open_price": 412.975,
+      "high_price": 429.49,
+      "low_price": 412.67,
+      "previous_close": 412.67,
+      "latest_trading_day": "2026-05-28",
+      "raw_response": {
+        "Global Quote": {
+          "01. symbol": "MSFT",
+          "02. open": "412.9750",
+          "03. high": "429.4900",
+          "04. low": "412.6700",
+          "05. price": "426.9900",
+          "06. volume": "45432702",
+          "07. latest trading day": "2026-05-28",
+          "08. previous close": "412.6700",
+          "09. change": "14.3200",
+          "10. change percent": "3.4701%"
+        }
+      },
+      "from_cache": false
+    }
+  },
+  "finnhub:AMD": {
+    "cached_at": 1780016358.9569538,
+    "payload": {
+      "source": "Finnhub",
+      "success": true,
+      "symbol": "AMD",
+      "current_price": 518.09,
+      "open_price": 499.0,
+      "high_price": 527.1999,
+      "low_price": 493.52,
+      "previous_close": 495.54,
+      "timestamp": 1779998400,
+      "raw_response": {
+        "c": 518.09,
+        "d": 22.55,
+        "dp": 4.5506,
+        "h": 527.1999,
+        "l": 493.52,
+        "o": 499,
+        "pc": 495.54,
+        "t": 1779998400
+      },
+      "from_cache": false
+    }
+  },
+  "alpha_vantage:AMD": {
+    "cached_at": 1780016359.3771777,
+    "payload": {
+      "source": "Alpha Vantage",
+      "success": true,
+      "symbol": "AMD",
+      "current_price": 518.09,
+      "open_price": 499.0,
+      "high_price": 527.1999,
+      "low_price": 493.52,
+      "previous_close": 495.54,
+      "latest_trading_day": "2026-05-28",
+      "raw_response": {
+        "Global Quote": {
+          "01. symbol": "AMD",
+          "02. open": "499.0000",
+          "03. high": "527.1999",
+          "04. low": "493.5200",
+          "05. price": "518.0900",
+          "06. volume": "31203706",
+          "07. latest trading day": "2026-05-28",
+          "08. previous close": "495.5400",
+          "09. change": "22.5500",
+          "10. change percent": "4.5506%"
+        }
+      },
+      "from_cache": false
+    }
+  }
+}

@@ -1,165 +1,134 @@
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
+
 import pandas as pd
 import yfinance as yf
 
 
 class HistoricalDataAgent:
     """
-    Historical Data Agent:
-    Automatically finds or downloads historical OHLCV data for a given stock symbol.
+    Historical Data Agent
 
-    It works as a local data memory/cache layer for the Training Agent.
+    Acts as a local memory layer for historical OHLCV data. It refreshes stale
+    files automatically and returns a clean list of price records for the
+    Analyst and Training agents.
     """
 
-    def __init__(self, data_dir: str = "data/historical"):
+    def __init__(self, data_dir: str = "data/historical", stale_days: int = 3):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.stale_days = stale_days
 
-    def _get_file_path(self, symbol: str) -> Path:
-        symbol = symbol.upper().strip()
-        return self.data_dir / f"{symbol}.csv"
+    def _path(self, symbol: str) -> Path:
+        return self.data_dir / f"{str(symbol).upper().strip()}.csv"
 
-    def load_local_data(self, symbol: str) -> dict:
-        """
-        Load local historical data if it already exists.
-        """
-        symbol = symbol.upper().strip()
-        file_path = self._get_file_path(symbol)
+    def _clean_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+        df = df.reset_index() if "Date" in df.index.names or "Datetime" in df.index.names else df.copy()
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+        rename_map = {"adj_close": "adj_close", "datetime": "date"}
+        df = df.rename(columns=rename_map)
+        if "date" not in df.columns:
+            for possible in ["index", "price_date"]:
+                if possible in df.columns:
+                    df = df.rename(columns={possible: "date"})
+                    break
+        if "close" not in df.columns and "adj_close" in df.columns:
+            df["close"] = df["adj_close"]
+        required = ["date", "open", "high", "low", "close", "volume"]
+        for col in required:
+            if col not in df.columns:
+                return pd.DataFrame()
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=required).sort_values("date")
+        df["date"] = df["date"].dt.strftime("%Y-%m-%d")
+        return df[required].drop_duplicates(subset=["date"], keep="last")
 
-        if not file_path.exists():
-            return {
-                "success": False,
-                "symbol": symbol,
-                "error": f"Local historical data not found: {file_path}"
-            }
+    def _latest_date(self, df: pd.DataFrame) -> Optional[pd.Timestamp]:
+        if df.empty or "date" not in df.columns:
+            return None
+        dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        if dates.empty:
+            return None
+        return dates.max()
 
+    def _is_stale(self, df: pd.DataFrame) -> bool:
+        latest = self._latest_date(df)
+        if latest is None:
+            return True
+        now = pd.Timestamp(datetime.now(timezone.utc).date())
+        return (now - latest.normalize()).days > self.stale_days
+
+    def load_local_data(self, symbol: str) -> Dict[str, Any]:
+        symbol = str(symbol or "").upper().strip()
+        path = self._path(symbol)
+        if not path.exists():
+            return {"success": False, "symbol": symbol, "source": "local_cache", "error": f"No local file: {path}"}
         try:
-            df = pd.read_csv(file_path)
-            df.columns = [c.lower().strip() for c in df.columns]
-
-            required_cols = ["date", "open", "high", "low", "close", "volume"]
-            missing_cols = [c for c in required_cols if c not in df.columns]
-
-            if missing_cols:
-                return {
-                    "success": False,
-                    "symbol": symbol,
-                    "error": f"Missing columns in local data: {missing_cols}"
-                }
-
-            price_records = df[required_cols].to_dict("records")
-
+            df = self._clean_df(pd.read_csv(path))
+            if df.empty:
+                return {"success": False, "symbol": symbol, "source": "local_cache", "error": "Local file could not be cleaned."}
             return {
                 "success": True,
+                "symbol": symbol,
                 "source": "local_cache",
-                "symbol": symbol,
-                "prices": price_records,
-                "file_path": str(file_path),
-                "num_records": len(price_records)
+                "file_path": str(path),
+                "prices": df.to_dict("records"),
+                "num_records": int(len(df)),
+                "latest_date": str(self._latest_date(df).date()),
+                "is_stale": self._is_stale(df),
+                "summary": f"Loaded {len(df)} historical rows for {symbol} from local cache.",
             }
+        except Exception as exc:
+            return {"success": False, "symbol": symbol, "source": "local_cache", "error": str(exc)}
 
-        except Exception as e:
-            return {
-                "success": False,
-                "symbol": symbol,
-                "error": f"Failed to load local historical data: {str(e)}"
-            }
-
-    def download_yfinance_data(
-        self,
-        symbol: str,
-        period: str = "2y",
-        interval: str = "1d"
-    ) -> dict:
-        """
-        Download historical OHLCV data from yfinance and cache it locally.
-        """
-        symbol = symbol.upper().strip()
-        file_path = self._get_file_path(symbol)
-
+    def download_yfinance_data(self, symbol: str, period: str = "1y", interval: str = "1d") -> Dict[str, Any]:
+        symbol = str(symbol or "").upper().strip()
+        if not symbol:
+            return {"success": False, "symbol": symbol, "source": "yfinance", "error": "Symbol is empty."}
         try:
-            df = yf.download(
-                tickers=symbol,
-                period=period,
-                interval=interval,
-                auto_adjust=False,
-                progress=False
-            )
-
+            df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False)
+            df = self._clean_df(df)
             if df.empty:
-                return {
-                    "success": False,
-                    "symbol": symbol,
-                    "error": "Downloaded historical data is empty."
-                }
-
-            df = df.reset_index()
-
-            # yfinance may return MultiIndex columns in some cases
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [
-                    col[0] if isinstance(col, tuple) else col
-                    for col in df.columns
-                ]
-
-            df = df.rename(columns={
-                "Date": "date",
-                "Datetime": "date",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume"
-            })
-
-            required_cols = ["date", "open", "high", "low", "close", "volume"]
-
-            missing_cols = [c for c in required_cols if c not in df.columns]
-            if missing_cols:
-                return {
-                    "success": False,
-                    "symbol": symbol,
-                    "error": f"Downloaded data missing columns: {missing_cols}"
-                }
-
-            df = df[required_cols].copy()
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-            df = df.dropna()
-
-            if df.empty:
-                return {
-                    "success": False,
-                    "symbol": symbol,
-                    "error": "Historical data became empty after cleaning."
-                }
-
-            df.to_csv(file_path, index=False)
-
+                return {"success": False, "symbol": symbol, "source": "yfinance", "error": "No usable historical data was downloaded."}
+            path = self._path(symbol)
+            df.to_csv(path, index=False)
             return {
                 "success": True,
+                "symbol": symbol,
                 "source": "yfinance",
-                "symbol": symbol,
-                "file_path": str(file_path),
-                "num_records": len(df),
-                "prices": df.to_dict("records")
+                "file_path": str(path),
+                "prices": df.to_dict("records"),
+                "num_records": int(len(df)),
+                "latest_date": str(self._latest_date(df).date()),
+                "is_stale": False,
+                "summary": f"Downloaded and saved {len(df)} historical rows for {symbol}.",
             }
+        except Exception as exc:
+            return {"success": False, "symbol": symbol, "source": "yfinance", "error": str(exc)}
 
-        except Exception as e:
-            return {
-                "success": False,
-                "symbol": symbol,
-                "error": f"yfinance download failed: {str(e)}"
-            }
+    def get_or_download_data(self, symbol: str, period: str = "1y", interval: str = "1d", force_refresh: bool = False) -> Dict[str, Any]:
+        local = self.load_local_data(symbol)
+        if local.get("success") and not force_refresh and not local.get("is_stale"):
+            return local
 
-    def get_or_download_data(self, symbol: str, period: str = "2y") -> dict:
-        """
-        Main method:
-        1. Try local cache first.
-        2. If not found, download from yfinance.
-        """
-        local_result = self.load_local_data(symbol)
+        downloaded = self.download_yfinance_data(symbol, period=period, interval=interval)
+        if downloaded.get("success"):
+            if local.get("success") and local.get("is_stale"):
+                downloaded["summary"] = f"Refreshed stale local data for {str(symbol).upper().strip()}."
+            return downloaded
 
-        if local_result.get("success"):
-            return local_result
+        if local.get("success"):
+            local["warning"] = "Fresh download failed, so stale local data was used."
+            local["summary"] = f"Used local historical data for {str(symbol).upper().strip()} because refresh failed."
+            return local
+        return downloaded
 
-        return self.download_yfinance_data(symbol, period=period)
+    def run(self, symbol: str, period: str = "1y") -> Dict[str, Any]:
+        return self.get_or_download_data(symbol=symbol, period=period)

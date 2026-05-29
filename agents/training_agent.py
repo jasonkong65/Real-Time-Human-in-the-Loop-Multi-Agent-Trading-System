@@ -1,948 +1,494 @@
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import joblib
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-
-from utils.features import build_trading_features
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
 
 class TrainingAgent:
     """
-    Training Agent:
-    Trains, loads, and uses a lightweight stock signal model.
+    Training Agent
 
-    Core model labels remain compatible with the existing pipeline:
-    - BUY_CANDIDATE
-    - HOLD
-    - SELL_RISK
+    Builds a lightweight signal model automatically. It tries several model
+    settings, chooses the best one with time-aware validation, saves the model,
+    and then refines the raw model label with the current analyst context.
 
-    This optimized version adds a post-model signal refinement layer so that
-    the system can distinguish:
-    - true downside / sell risk
-    - positive trend but elevated entry risk / overbought conditions
-
-    Key improvement:
-    If the raw model predicts SELL_RISK for a stock with positive momentum,
-    positive moving-average structure, and non-high model confidence, the
-    signal is softened to HOLD and annotated as BUY_WATCHLIST_OVERBOUGHT.
-
-    This avoids the previous problem where a rising stock such as AAPL could be
-    interpreted as a direct SELL_RISK only because the model learned short-term
-    pullback risk from future-return labels.
+    The pipeline still returns only the core labels expected by app.py:
+    BUY_CANDIDATE, HOLD, SELL_RISK.
     """
 
-    CORE_SIGNALS = {"BUY_CANDIDATE", "HOLD", "SELL_RISK"}
+    MODEL_VERSION = "auto_rf_v3"
+    CORE_SIGNALS = ["BUY_CANDIDATE", "HOLD", "SELL_RISK"]
+    FEATURE_COLUMNS = [
+        "return_1",
+        "return_5",
+        "return_20",
+        "ma_gap",
+        "volatility_20",
+        "volume_change",
+        "rsi_14",
+        "validation_confidence_score",
+    ]
 
     def __init__(self, model_path: str = "models/signal_model.pkl"):
         self.base_model_path = Path(model_path)
         self.model_path = Path(model_path)
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.feature_columns = list(self.FEATURE_COLUMNS)
+        self.model_bundle: Optional[Dict[str, Any]] = None
 
-        self.feature_columns = [
-            "return_1",
-            "return_5",
-            "return_20",
-            "ma_gap",
-            "volatility_20",
-            "volume_change",
-            "rsi_14",
-            "validation_confidence_score",
-        ]
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # --------------------------------------------------
-    # Model path helpers
-    # --------------------------------------------------
-    def _set_symbol_model_path(self, symbol: Optional[str] = None):
-        """
-        Use one model per symbol when symbol is available.
-        Example: models/signal_model_AAPL.pkl
-        """
+    def _set_symbol_model_path(self, symbol: Optional[str] = None) -> None:
         if symbol:
-            clean_symbol = str(symbol).upper().strip()
-            self.model_path = Path("models") / f"signal_model_{clean_symbol}.pkl"
+            clean = str(symbol).upper().strip()
+            self.model_path = Path("models") / f"signal_model_{clean}.pkl"
         else:
             self.model_path = self.base_model_path
-
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def model_exists(self) -> bool:
-        return self.model_path.exists()
-
-    # --------------------------------------------------
-    # Main app.py-compatible training method
-    # --------------------------------------------------
-    def train_or_load_model(
-        self,
-        historical_data: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        force_retrain: bool = False,
-        csv_path: str = "data/historical_data.csv",
-    ) -> Dict[str, Any]:
-        """
-        Main method expected by app.py.
-
-        Logic:
-        1. Set per-symbol model path if symbol is provided.
-        2. If model exists and force_retrain=False, load model info.
-        3. Else train from historical_data if available.
-        4. Else train from local CSV.
-        5. If training fails but old model exists, load old model instead.
-        """
-
-        if symbol is None and isinstance(historical_data, dict):
-            symbol = historical_data.get("symbol")
-
-        self._set_symbol_model_path(symbol)
-
-        if self.model_exists() and not force_retrain:
-            return self.load_existing_model_info()
-
-        training_result = None
-
-        if isinstance(historical_data, dict) and historical_data.get("success"):
-            training_result = self.train_from_historical_data(historical_data)
-
-        if not training_result or not training_result.get("success"):
-            csv_training_result = self.train_from_csv(csv_path)
-
-            if csv_training_result.get("success"):
-                return csv_training_result
-
-            if training_result is not None:
-                return training_result
-
-            return csv_training_result
-
-        return training_result
-
-    # Compatibility aliases
-    def train_or_load_signal_model(
-        self,
-        historical_data: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        force_retrain: bool = False,
-    ) -> Dict[str, Any]:
-        return self.train_or_load_model(
-            historical_data=historical_data,
-            symbol=symbol,
-            force_retrain=force_retrain,
-        )
-
-    def load_or_train_model(
-        self,
-        historical_data: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        force_retrain: bool = False,
-    ) -> Dict[str, Any]:
-        return self.train_or_load_model(
-            historical_data=historical_data,
-            symbol=symbol,
-            force_retrain=force_retrain,
-        )
-
-    def run_training(
-        self,
-        historical_data: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        force_retrain: bool = False,
-    ) -> Dict[str, Any]:
-        return self.train_or_load_model(
-            historical_data=historical_data,
-            symbol=symbol,
-            force_retrain=force_retrain,
-        )
-
-    def run(
-        self,
-        historical_data: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-        force_retrain: bool = False,
-    ) -> Dict[str, Any]:
-        return self.train_or_load_model(
-            historical_data=historical_data,
-            symbol=symbol,
-            force_retrain=force_retrain,
-        )
-
-    # --------------------------------------------------
-    # Load existing model metadata
-    # --------------------------------------------------
-    def load_existing_model_info(self) -> Dict[str, Any]:
-        if not self.model_path.exists():
-            return {
-                "success": False,
-                "agent_goal": "Load an existing trained signal model.",
-                "agent_decision": "No existing model was found.",
-                "summary": f"Model not found at {self.model_path}.",
-                "model_path": str(self.model_path),
-            }
-
-        try:
-            model_bundle = joblib.load(self.model_path)
-
-            return {
-                "success": True,
-                "agent_goal": "Load an existing trained signal model.",
-                "agent_decision": "Existing signal model was loaded. Retraining was skipped.",
-                "model_path": str(self.model_path),
-                "model_type": type(model_bundle.get("model")).__name__,
-                "trained_at": model_bundle.get("trained_at"),
-                "feature_columns": model_bundle.get("feature_columns"),
-                "label_rule": model_bundle.get("label_rule"),
-                "post_prediction_refinement": model_bundle.get(
-                    "post_prediction_refinement",
-                    "enabled_in_current_agent_code",
-                ),
-                "num_samples": model_bundle.get("num_samples"),
-                "train_accuracy": model_bundle.get("train_accuracy"),
-                "test_accuracy": model_bundle.get("test_accuracy"),
-                "label_distribution": model_bundle.get("label_distribution"),
-                "summary": f"Loaded existing signal model from {self.model_path}.",
-            }
-
-        except Exception as e:
-            return {
-                "success": False,
-                "agent_goal": "Load an existing trained signal model.",
-                "agent_decision": "Existing model could not be loaded.",
-                "summary": f"Model loading failed: {str(e)}",
-                "model_path": str(self.model_path),
-            }
-
-    # --------------------------------------------------
-    # Training helpers
-    # --------------------------------------------------
-    def _confidence_level(self, prediction_confidence):
-        if prediction_confidence is None:
-            return "Unknown"
-
-        try:
-            prediction_confidence = float(prediction_confidence)
-        except Exception:
-            return "Unknown"
-
-        if prediction_confidence >= 0.65:
-            return "High"
-        elif prediction_confidence >= 0.45:
-            return "Medium"
-        else:
-            return "Low"
+    def _metadata_path(self) -> Path:
+        return self.model_path.with_suffix(".metadata.json")
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         try:
-            if value is None:
+            if value is None or value == "":
                 return default
             return float(value)
         except Exception:
             return default
 
+    def _rsi(self, close: pd.Series, window: int = 14) -> pd.Series:
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
+        avg_gain = gain.rolling(window=window).mean()
+        avg_loss = loss.rolling(window=window).mean()
+        rs = avg_gain / avg_loss.replace(0, 1e-9)
+        return 100 - (100 / (1 + rs))
+
+    def _clean_history(self, historical_data: Dict[str, Any]) -> pd.DataFrame:
+        prices = historical_data.get("prices", []) if isinstance(historical_data, dict) else []
+        if not prices:
+            return pd.DataFrame()
+        df = pd.DataFrame(prices)
+        df.columns = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
+        if "close" not in df.columns and "adj_close" in df.columns:
+            df["close"] = df["adj_close"]
+        required = ["open", "high", "low", "close", "volume"]
+        for col in required:
+            if col not in df.columns:
+                return pd.DataFrame()
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.sort_values("date")
+        return df.dropna(subset=required).reset_index(drop=True)
+
     def _make_label(self, future_return: float) -> str:
-        """
-        Training target label from future 5-day return.
-
-        This target is intentionally simple for the assignment. The optimized
-        agent corrects short-term pullback bias at prediction time through
-        post-model signal refinement.
-        """
-        if future_return > 0.015:
+        # Balanced but cautious thresholds. They are intentionally moderate so
+        # the model learns watchlist-style signals rather than extreme actions.
+        if future_return >= 0.018:
             return "BUY_CANDIDATE"
-        elif future_return < -0.015:
+        if future_return <= -0.018:
             return "SELL_RISK"
-        else:
-            return "HOLD"
-
-    def train_from_historical_data(self, historical_data: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(historical_data, dict) or not historical_data.get("success"):
-            return {
-                "success": False,
-                "agent_goal": "Train a lightweight signal model from historical market data.",
-                "agent_decision": "Training skipped because historical data is unavailable.",
-                "summary": (
-                    historical_data.get("error", "Historical data unavailable.")
-                    if isinstance(historical_data, dict)
-                    else "Historical data unavailable."
-                ),
-                "model_path": str(self.model_path),
-            }
-
-        symbol = historical_data.get("symbol")
-        if symbol:
-            self._set_symbol_model_path(symbol)
-
-        price_records = historical_data.get("prices", [])
-        return self.train_from_price_records(price_records)
-
-    def train_from_csv(self, csv_path: str = "data/historical_data.csv") -> Dict[str, Any]:
-        csv_path = Path(csv_path)
-
-        if not csv_path.exists() or csv_path.stat().st_size == 0:
-            return {
-                "success": False,
-                "agent_goal": "Train a lightweight signal model from local CSV data.",
-                "agent_decision": "Training skipped because local CSV data was not found or is empty.",
-                "summary": f"Training CSV not found or empty at {csv_path}.",
-                "model_path": str(self.model_path),
-            }
-
-        try:
-            df = pd.read_csv(csv_path)
-            df.columns = [c.lower().strip() for c in df.columns]
-
-            required_cols = ["date", "open", "high", "low", "close", "volume"]
-            missing_cols = [c for c in required_cols if c not in df.columns]
-
-            if missing_cols:
-                return {
-                    "success": False,
-                    "agent_goal": "Train a lightweight signal model from local CSV data.",
-                    "agent_decision": "Training failed because required columns are missing.",
-                    "summary": f"Missing columns: {missing_cols}",
-                    "model_path": str(self.model_path),
-                }
-
-            price_records = df[required_cols].to_dict("records")
-            return self.train_from_price_records(price_records)
-
-        except Exception as e:
-            return {
-                "success": False,
-                "agent_goal": "Train a lightweight signal model from local CSV data.",
-                "agent_decision": "Training failed while reading CSV data.",
-                "summary": f"CSV training error: {str(e)}",
-                "model_path": str(self.model_path),
-            }
-
-    def train_from_price_records(self, price_records: list) -> Dict[str, Any]:
-        agent_goal = "Train a lightweight stock signal model using engineered technical features."
-
-        if not price_records:
-            return {
-                "success": False,
-                "agent_goal": agent_goal,
-                "agent_decision": "Training failed because no price records were provided.",
-                "summary": "No price records available for training.",
-                "model_path": str(self.model_path),
-            }
-
-        feature_df = build_trading_features(price_records)
-
-        if feature_df.empty:
-            return {
-                "success": False,
-                "agent_goal": agent_goal,
-                "agent_decision": "Training failed because features could not be constructed.",
-                "summary": "Feature dataframe is empty.",
-                "model_path": str(self.model_path),
-            }
-
-        feature_df["validation_confidence_score"] = 1.0
-
-        feature_df["future_return_5"] = (
-            feature_df["close"].shift(-5) / feature_df["close"] - 1
-        )
-
-        feature_df["target_signal"] = feature_df["future_return_5"].apply(
-            lambda x: self._make_label(x) if pd.notna(x) else None
-        )
-
-        model_df = feature_df.dropna(
-            subset=self.feature_columns + ["target_signal"]
-        ).copy()
-
-        if len(model_df) < 30:
-            return {
-                "success": False,
-                "agent_goal": agent_goal,
-                "agent_decision": "Training failed because there are not enough usable samples.",
-                "summary": f"Only {len(model_df)} usable samples found. At least 30 are recommended.",
-                "model_path": str(self.model_path),
-            }
-
-        if model_df["target_signal"].nunique() < 2:
-            return {
-                "success": False,
-                "agent_goal": agent_goal,
-                "agent_decision": "Training failed because target labels do not contain enough classes.",
-                "summary": "At least two target classes are required to train the model.",
-                "model_path": str(self.model_path),
-            }
-
-        X = model_df[self.feature_columns]
-        y = model_df["target_signal"]
-
-        split_index = int(len(model_df) * 0.8)
-
-        X_train = X.iloc[:split_index]
-        y_train = y.iloc[:split_index]
-        X_test = X.iloc[split_index:]
-        y_test = y.iloc[split_index:]
-
-        model = RandomForestClassifier(
-            n_estimators=120,
-            max_depth=5,
-            random_state=42,
-            class_weight="balanced",
-            min_samples_leaf=2,
-        )
-
-        model.fit(X_train, y_train)
-
-        train_pred = model.predict(X_train)
-        train_accuracy = accuracy_score(y_train, train_pred)
-
-        test_accuracy = None
-        if len(X_test) > 0:
-            test_pred = model.predict(X_test)
-            test_accuracy = accuracy_score(y_test, test_pred)
-
-        label_distribution = model_df["target_signal"].value_counts().to_dict()
-
-        model_bundle = {
-            "model": model,
-            "feature_columns": self.feature_columns,
-            "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "label_rule": (
-                "future_return_5 > 1.5% = BUY_CANDIDATE; "
-                "< -1.5% = SELL_RISK; otherwise HOLD. "
-                "At prediction time, a post-model refinement layer separates true downside risk "
-                "from positive-trend but elevated-entry-risk conditions."
-            ),
-            "post_prediction_refinement": "enabled",
-            "num_samples": len(model_df),
-            "train_accuracy": round(train_accuracy, 3),
-            "test_accuracy": round(test_accuracy, 3) if test_accuracy is not None else None,
-            "label_distribution": label_distribution,
-        }
-
-        joblib.dump(model_bundle, self.model_path)
-
-        return {
-            "success": True,
-            "agent_goal": agent_goal,
-            "agent_decision": "Training completed and the signal model was saved.",
-            "model_type": "RandomForestClassifier",
-            "model_path": str(self.model_path),
-            "num_samples": len(model_df),
-            "train_accuracy": round(train_accuracy, 3),
-            "test_accuracy": round(test_accuracy, 3) if test_accuracy is not None else None,
-            "label_distribution": label_distribution,
-            "feature_columns": self.feature_columns,
-            "label_rule": model_bundle["label_rule"],
-            "post_prediction_refinement": "enabled",
-            "summary": (
-                f"Signal model trained with {len(model_df)} samples. "
-                f"Train accuracy={train_accuracy:.2f}, "
-                f"test accuracy={test_accuracy:.2f}."
-                if test_accuracy is not None
-                else f"Signal model trained with {len(model_df)} samples."
-            ),
-        }
-
-    # --------------------------------------------------
-    # Market context and signal refinement
-    # --------------------------------------------------
-    def _get_feature_value(
-        self,
-        analysis_result: Dict[str, Any],
-        features: Dict[str, Any],
-        key: str,
-        default: float = 0.0,
-    ) -> float:
-        if key in features and features.get(key) is not None:
-            return self._safe_float(features.get(key), default)
-        if key in analysis_result and analysis_result.get(key) is not None:
-            return self._safe_float(analysis_result.get(key), default)
-        return default
-
-    def _market_context(
-        self,
-        analysis_result: Dict[str, Any],
-        features: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        features = features or analysis_result.get("features_for_model") or {}
-
-        return_1 = self._get_feature_value(analysis_result, features, "return_1", 0.0)
-        return_5 = self._get_feature_value(analysis_result, features, "return_5", 0.0)
-        return_20 = self._get_feature_value(analysis_result, features, "return_20", 0.0)
-        ma_gap = self._get_feature_value(analysis_result, features, "ma_gap", 0.0)
-        volatility_20 = self._get_feature_value(analysis_result, features, "volatility_20", 0.0)
-        rsi_14 = self._get_feature_value(analysis_result, features, "rsi_14", 50.0)
-        analyst_score = self._safe_float(analysis_result.get("analyst_score"), 0.5)
-
-        analyst_signal = analysis_result.get("analyst_signal", "Unknown")
-        volatility_level = analysis_result.get("volatility_level")
-
-        positive_momentum = (return_20 >= 0.04) or (return_5 >= 0.02) or (
-            return_20 >= 0.02 and ma_gap >= 0.015
-        )
-        negative_momentum = (return_20 <= -0.04) or (return_5 <= -0.02) or (
-            return_20 <= -0.02 and ma_gap <= -0.015
-        )
-        positive_structure = ma_gap >= 0.015 or analyst_score >= 0.60
-        negative_structure = ma_gap <= -0.015 or analyst_score <= 0.35
-
-        if positive_momentum and positive_structure:
-            trend_direction = "Positive"
-        elif negative_momentum and negative_structure:
-            trend_direction = "Negative"
-        else:
-            trend_direction = "Mixed_or_Neutral"
-
-        if rsi_14 >= 75:
-            rsi_status = "Strongly_Overbought"
-        elif rsi_14 >= 70:
-            rsi_status = "Overbought"
-        elif rsi_14 <= 25:
-            rsi_status = "Strongly_Oversold"
-        elif rsi_14 <= 30:
-            rsi_status = "Oversold"
-        else:
-            rsi_status = "Normal"
-
-        entry_risk_score = 0
-        entry_risk_reasons = []
-
-        if rsi_14 >= 70:
-            entry_risk_score += 2
-            entry_risk_reasons.append("RSI is high, so chasing risk may be elevated.")
-
-        if return_20 >= 0.08:
-            entry_risk_score += 1
-            entry_risk_reasons.append("20-day return is strong, so short-term pullback risk may exist.")
-
-        if ma_gap >= 0.06:
-            entry_risk_score += 1
-            entry_risk_reasons.append("Short-term moving average is far above the medium-term level.")
-
-        if volatility_level == "High" or volatility_20 >= 0.05:
-            entry_risk_score += 1
-            entry_risk_reasons.append("Volatility is elevated.")
-
-        if entry_risk_score >= 3:
-            entry_risk_level = "High"
-        elif entry_risk_score >= 1:
-            entry_risk_level = "Medium"
-        else:
-            entry_risk_level = "Low"
-
-        return {
-            "return_1": round(return_1, 4),
-            "return_5": round(return_5, 4),
-            "return_20": round(return_20, 4),
-            "ma_gap": round(ma_gap, 4),
-            "volatility_20": round(volatility_20, 4),
-            "rsi_14": round(rsi_14, 2),
-            "analyst_score": round(analyst_score, 3),
-            "analyst_signal": analyst_signal,
-            "volatility_level": volatility_level,
-            "trend_direction": trend_direction,
-            "rsi_status": rsi_status,
-            "entry_risk_level": entry_risk_level,
-            "entry_risk_reasons": entry_risk_reasons,
-            "positive_momentum": positive_momentum,
-            "negative_momentum": negative_momentum,
-            "positive_structure": positive_structure,
-            "negative_structure": negative_structure,
-        }
-
-    def _core_signal_for_pipeline(self, enriched_signal: str) -> str:
-        """
-        Convert enriched signal into a core signal if another agent requires
-        the original 3-label interface.
-        """
-        if enriched_signal in self.CORE_SIGNALS:
-            return enriched_signal
-
-        if enriched_signal in {"BUY_WATCHLIST_OVERBOUGHT", "WATCHLIST_BULLISH"}:
-            return "HOLD"
-
-        if enriched_signal in {"HOLD_MONITOR", "WAIT_FOR_CONFIRMATION"}:
-            return "HOLD"
-
-        if enriched_signal in {"DOWNSIDE_RISK_MONITOR"}:
-            return "SELL_RISK"
-
         return "HOLD"
 
-    def _refine_signal(
-        self,
-        raw_signal: str,
-        prediction_confidence: Optional[float],
-        probabilities: Dict[str, Any],
-        analysis_result: Dict[str, Any],
-        features: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Refine raw model output using current market context.
+    def _build_dataset(self, historical_data: Dict[str, Any], validation_confidence_score: float = 0.95) -> Tuple[pd.DataFrame, pd.Series, Dict[str, Any]]:
+        df = self._clean_history(historical_data)
+        if df.empty or len(df) < 80:
+            raise ValueError("Not enough historical data for automatic model training.")
 
-        This does NOT pretend to know the future. It corrects label semantics:
-        a model may predict SELL_RISK because the next 5-day target historically
-        fell after strong rallies, but that should be interpreted as elevated
-        entry/pullback risk, not necessarily a bearish trend.
-        """
-        context = self._market_context(analysis_result, features)
-        confidence_level = self._confidence_level(prediction_confidence)
-        analyst_score = context["analyst_score"]
-        trend = context["trend_direction"]
-        entry_risk = context["entry_risk_level"]
-        rsi_status = context["rsi_status"]
+        close = df["close"]
+        volume = df["volume"]
+        features = pd.DataFrame(index=df.index)
+        features["return_1"] = close.pct_change(1)
+        features["return_5"] = close.pct_change(5)
+        features["return_20"] = close.pct_change(20)
+        ma20 = close.rolling(20).mean()
+        ma50 = close.rolling(50).mean()
+        features["ma_gap"] = (ma20 - ma50) / ma50.replace(0, 1e-9)
+        features["volatility_20"] = close.pct_change().rolling(20).std()
+        features["volume_change"] = (volume.rolling(5).mean() - volume.rolling(20).mean()) / volume.rolling(20).mean().replace(0, 1e-9)
+        features["rsi_14"] = self._rsi(close, 14)
+        features["validation_confidence_score"] = validation_confidence_score
+        future_return = close.shift(-5) / close - 1
+        labels = future_return.apply(lambda x: self._make_label(float(x)) if pd.notna(x) else None)
 
-        final_signal = raw_signal
-        enhanced_signal = raw_signal
-        adjustment_applied = False
-        adjustment_reason = "No post-model adjustment was applied."
+        dataset = features.copy()
+        dataset["label"] = labels
+        dataset = dataset.replace([float("inf"), float("-inf")], pd.NA).dropna()
+        X = dataset[self.feature_columns].astype(float)
+        y = dataset["label"].astype(str)
+        label_distribution = y.value_counts().to_dict()
+        if y.nunique() < 2:
+            raise ValueError("Training labels contain fewer than two classes.")
+        return X, y, {"label_distribution": label_distribution, "num_samples": int(len(X))}
 
-        # Case 1: positive trend but raw model says SELL_RISK.
-        # This is the key AAPL-style correction.
-        if raw_signal == "SELL_RISK" and trend == "Positive":
-            if confidence_level in {"Low", "Medium", "Unknown"} or analyst_score >= 0.58:
-                final_signal = "HOLD"
-                enhanced_signal = "BUY_WATCHLIST_OVERBOUGHT" if entry_risk in {"Medium", "High"} else "HOLD_MONITOR"
-                adjustment_applied = True
-                adjustment_reason = (
-                    "Raw model predicted SELL_RISK, but current technical context shows a positive trend. "
-                    "The signal was softened to HOLD and annotated as positive-trend with elevated entry risk."
-                )
+    def _candidate_models(self):
+        return [
+            (
+                "random_forest_balanced_small",
+                RandomForestClassifier(n_estimators=120, max_depth=4, min_samples_leaf=4, class_weight="balanced", random_state=42),
+                {"family": "RandomForest", "n_estimators": 120, "max_depth": 4, "min_samples_leaf": 4},
+            ),
+            (
+                "random_forest_balanced_medium",
+                RandomForestClassifier(n_estimators=180, max_depth=6, min_samples_leaf=3, class_weight="balanced", random_state=42),
+                {"family": "RandomForest", "n_estimators": 180, "max_depth": 6, "min_samples_leaf": 3},
+            ),
+            (
+                "random_forest_balanced_flexible",
+                RandomForestClassifier(n_estimators=220, max_depth=None, min_samples_leaf=5, class_weight="balanced", random_state=42),
+                {"family": "RandomForest", "n_estimators": 220, "max_depth": None, "min_samples_leaf": 5},
+            ),
+            (
+                "extra_trees_stable",
+                ExtraTreesClassifier(n_estimators=200, max_depth=6, min_samples_leaf=4, class_weight="balanced", random_state=42),
+                {"family": "ExtraTrees", "n_estimators": 200, "max_depth": 6, "min_samples_leaf": 4},
+            ),
+        ]
 
-        # Case 2: raw BUY_CANDIDATE but entry risk is high.
-        elif raw_signal == "BUY_CANDIDATE" and entry_risk == "High":
-            final_signal = "HOLD"
-            enhanced_signal = "BUY_WATCHLIST_OVERBOUGHT"
-            adjustment_applied = True
-            adjustment_reason = (
-                "Raw model predicted BUY_CANDIDATE, but RSI/momentum conditions suggest elevated entry risk. "
-                "The signal was softened to HOLD and annotated as BUY_WATCHLIST_OVERBOUGHT."
-            )
-
-        # Case 3: raw HOLD but analyst context is clearly positive.
-        elif raw_signal == "HOLD" and trend == "Positive" and analyst_score >= 0.60:
-            final_signal = "HOLD"
-            enhanced_signal = "BUY_WATCHLIST_OVERBOUGHT" if entry_risk in {"Medium", "High"} else "WATCHLIST_BULLISH"
-            adjustment_applied = True
-            adjustment_reason = (
-                "Raw model predicted HOLD, but analyst and technical context are positive. "
-                "The core signal remains HOLD for safety, with a bullish watchlist annotation."
-            )
-
-        # Case 4: raw BUY_CANDIDATE but current trend context is negative.
-        elif raw_signal == "BUY_CANDIDATE" and trend == "Negative":
-            final_signal = "HOLD"
-            enhanced_signal = "WAIT_FOR_CONFIRMATION"
-            adjustment_applied = True
-            adjustment_reason = (
-                "Raw model predicted BUY_CANDIDATE, but current trend context is negative. "
-                "The signal was softened to HOLD until confirmation improves."
-            )
-
-        # Case 5: raw HOLD but context is clearly negative.
-        elif raw_signal == "HOLD" and trend == "Negative" and analyst_score <= 0.40:
-            final_signal = "SELL_RISK"
-            enhanced_signal = "DOWNSIDE_RISK_MONITOR"
-            adjustment_applied = True
-            adjustment_reason = (
-                "Raw model predicted HOLD, but current analyst and trend context are negative. "
-                "The signal was tightened to SELL_RISK for risk awareness."
-            )
-
-        if enhanced_signal == final_signal and final_signal == "BUY_CANDIDATE" and rsi_status in {"Overbought", "Strongly_Overbought"}:
-            enhanced_signal = "BUY_WATCHLIST_OVERBOUGHT"
-            adjustment_applied = True
-            adjustment_reason = (
-                "The core signal remains BUY_CANDIDATE, but RSI is elevated, so the display signal is annotated as overbought."
-            )
-
-        core_signal = self._core_signal_for_pipeline(enhanced_signal)
-
+    def _time_split_score(self, model, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
+        n = len(X)
+        split = max(int(n * 0.75), 50)
+        if split >= n - 10:
+            split = max(int(n * 0.70), 30)
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
+        y_train, y_test = y.iloc[:split], y.iloc[split:]
+        model.fit(X_train, y_train)
+        pred = model.predict(X_test)
+        acc = accuracy_score(y_test, pred)
+        bal = balanced_accuracy_score(y_test, pred)
+        macro_f1 = f1_score(y_test, pred, average="macro", zero_division=0)
+        score = 0.40 * bal + 0.40 * macro_f1 + 0.20 * acc
         return {
-            "raw_model_signal": raw_signal,
-            "model_signal": final_signal,
-            "core_signal": core_signal,
-            "enhanced_signal": enhanced_signal,
-            "display_signal": enhanced_signal,
-            "adjustment_applied": adjustment_applied,
-            "adjustment_reason": adjustment_reason,
-            "market_context": context,
-            "prediction_confidence": prediction_confidence,
-            "confidence_level": self._confidence_level(prediction_confidence),
-            "probabilities": probabilities or {},
+            "score": float(score),
+            "test_accuracy": float(acc),
+            "balanced_accuracy": float(bal),
+            "macro_f1": float(macro_f1),
+            "test_size": int(len(X_test)),
+            "pred_distribution": pd.Series(pred).value_counts().to_dict(),
         }
 
-    # --------------------------------------------------
-    # Signal generation
-    # --------------------------------------------------
-    def generate_signal(
-        self,
-        analysis_result: Dict[str, Any],
-        training_result: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Main method expected by app.py.
-        Generate signal after Training Agent has loaded/trained the model.
-        """
-        if symbol is None and isinstance(analysis_result, dict):
-            symbol = analysis_result.get("symbol")
+    def _auto_train(self, historical_data: Dict[str, Any], symbol: Optional[str], validation_confidence_score: float = 0.95) -> Dict[str, Any]:
+        X, y, data_info = self._build_dataset(historical_data, validation_confidence_score)
+        baseline_label = y.iloc[: int(len(y) * 0.75)].mode().iloc[0]
+        split = max(int(len(X) * 0.75), 50)
+        if split >= len(X) - 10:
+            split = max(int(len(X) * 0.70), 30)
+        baseline_acc = accuracy_score(y.iloc[split:], [baseline_label] * len(y.iloc[split:]))
 
-        if symbol:
-            self._set_symbol_model_path(symbol)
+        results = []
+        best = None
+        for name, model, params in self._candidate_models():
+            try:
+                score_info = self._time_split_score(model, X, y)
+                row = {"candidate": name, **params, **score_info}
+                results.append(row)
+                if best is None or score_info["score"] > best["score_info"]["score"]:
+                    best = {"name": name, "model": model, "params": params, "score_info": score_info}
+            except Exception as exc:
+                results.append({"candidate": name, "error": str(exc)})
 
-        if isinstance(training_result, dict):
-            model_path = training_result.get("model_path")
-            if model_path:
-                self.model_path = Path(model_path)
+        if best is None:
+            raise ValueError("Automatic model selection failed for every candidate.")
 
-        return self.predict_signal(analysis_result)
-
-    def generate_trading_signal(
-        self,
-        analysis_result: Dict[str, Any],
-        training_result: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.generate_signal(
-            analysis_result=analysis_result,
-            training_result=training_result,
-            symbol=symbol,
-        )
-
-    def run_signal_model(
-        self,
-        analysis_result: Dict[str, Any],
-        training_result: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.generate_signal(
-            analysis_result=analysis_result,
-            training_result=training_result,
-            symbol=symbol,
-        )
-
-    def predict(
-        self,
-        analysis_result: Dict[str, Any],
-        training_result: Optional[Dict[str, Any]] = None,
-        symbol: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        return self.generate_signal(
-            analysis_result=analysis_result,
-            training_result=training_result,
-            symbol=symbol,
-        )
-
-    def _fallback_signal(self, analysis_result: Dict[str, Any], reason: str) -> Dict[str, Any]:
-        analysis_result = analysis_result if isinstance(analysis_result, dict) else {}
-        analyst_signal = analysis_result.get("analyst_signal")
-        analyst_score = analysis_result.get("analyst_score", 0.5)
-        volatility_level = analysis_result.get("volatility_level")
-        features = analysis_result.get("features_for_model") or {}
-
-        analyst_score_float = self._safe_float(analyst_score, 0.5)
-
-        bullish_signals = [
-            "BULLISH",
-            "BULLISH_WATCH",
-            "QUOTE_BULLISH",
-            "HISTORICAL_BULLISH",
-            "BUY_CANDIDATE",
-            "WATCHLIST_BULLISH",
-            "BUY_WATCHLIST_OVERBOUGHT",
-        ]
-
-        bearish_signals = [
-            "BEARISH",
-            "BEARISH_RISK",
-            "QUOTE_BEARISH",
-            "HISTORICAL_BEARISH",
-            "SELL_RISK",
-            "DOWNSIDE_RISK_MONITOR",
-        ]
-
-        if analyst_signal in bullish_signals or analyst_score_float >= 0.70:
-            raw_signal = "BUY_CANDIDATE"
-        elif analyst_signal in bearish_signals or analyst_score_float <= 0.35:
-            raw_signal = "SELL_RISK"
-        else:
-            raw_signal = "HOLD"
-
-        if volatility_level == "High" and raw_signal == "BUY_CANDIDATE":
-            raw_signal = "HOLD"
-
-        prediction_confidence = round(analyst_score_float, 3)
-        probabilities = {}
-        refined = self._refine_signal(
-            raw_signal=raw_signal,
-            prediction_confidence=prediction_confidence,
-            probabilities=probabilities,
-            analysis_result=analysis_result,
-            features=features,
-        )
+        # Refit the best model on all available rows.
+        final_model = best["model"]
+        final_model.fit(X, y)
+        bundle = {
+            "model": final_model,
+            "feature_columns": self.feature_columns,
+            "model_version": self.MODEL_VERSION,
+            "symbol": str(symbol).upper().strip() if symbol else None,
+            "trained_at_utc": self._now(),
+            "best_params": best["params"],
+            "model_selection_score": best["score_info"],
+            "label_distribution": data_info["label_distribution"],
+        }
+        joblib.dump(bundle, self.model_path)
+        self.model_bundle = bundle
 
         return {
             "success": True,
-            "agent_goal": "Generate a trading signal from analyst features.",
-            "signal_source": "fallback_rule_with_context_refinement",
-            "model_signal": refined["model_signal"],
-            "raw_model_signal": refined["raw_model_signal"],
-            "core_signal": refined["core_signal"],
-            "enhanced_signal": refined["enhanced_signal"],
-            "display_signal": refined["display_signal"],
-            "prediction_confidence": refined["prediction_confidence"],
-            "confidence_level": refined["confidence_level"],
-            "probabilities": probabilities,
-            "market_context": refined["market_context"],
-            "adjustment_applied": refined["adjustment_applied"],
-            "adjustment_reason": refined["adjustment_reason"],
-            "agent_decision": (
-                f"Used fallback rule because {reason} "
-                f"Post-model context refinement: {refined['adjustment_reason']}"
-            ),
-            "signal_for_next_agent": {
-                "symbol": analysis_result.get("symbol"),
-                "signal": refined["model_signal"],
-                "core_signal": refined["core_signal"],
-                "enhanced_signal": refined["enhanced_signal"],
-                "display_signal": refined["display_signal"],
-                "signal_source": "fallback_rule_with_context_refinement",
-                "prediction_confidence": refined["prediction_confidence"],
-                "confidence_level": refined["confidence_level"],
-                "raw_model_signal": refined["raw_model_signal"],
-                "probabilities": probabilities,
-                "analyst_score": analyst_score_float,
-                "volatility_level": volatility_level,
-                "market_context": refined["market_context"],
-            },
-            "summary": (
-                f"Fallback signal generated: {refined['model_signal']} "
-                f"({refined['enhanced_signal']}) with {refined['confidence_level'].lower()} confidence."
-            ),
+            "agent": "Training Agent",
+            "agent_goal": "Automatically train and select the best lightweight signal model.",
+            "symbol": str(symbol).upper().strip() if symbol else historical_data.get("symbol", "UNKNOWN"),
+            "model_source": "auto_optimized_training",
+            "model_path": str(self.model_path),
+            "model_version": self.MODEL_VERSION,
+            "best_params": best["params"],
+            "best_candidate": best["name"],
+            "selection_score": round(best["score_info"]["score"], 4),
+            "test_accuracy": round(best["score_info"]["test_accuracy"], 4),
+            "balanced_accuracy": round(best["score_info"]["balanced_accuracy"], 4),
+            "macro_f1": round(best["score_info"]["macro_f1"], 4),
+            "baseline_accuracy": round(float(baseline_acc), 4),
+            "num_samples": data_info["num_samples"],
+            "label_distribution": data_info["label_distribution"],
+            "optimization_results": results,
+            "agent_decision": "The Training Agent selected and saved the strongest model automatically.",
+            "summary": f"Training Agent automatically selected {best['name']} for {symbol or historical_data.get('symbol', 'UNKNOWN')}.",
         }
 
-    def predict_signal(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Predict trading signal using the trained model.
-        If the model is unavailable or features are incomplete, use fallback rules.
-        """
-        if not isinstance(analysis_result, dict) or not analysis_result.get("success"):
-            return self._fallback_signal(
-                analysis_result if isinstance(analysis_result, dict) else {},
-                reason="Analyst Agent did not produce a successful analysis.",
-            )
-
-        symbol = analysis_result.get("symbol")
-        if symbol:
-            self._set_symbol_model_path(symbol)
-
-        if not self.model_path.exists():
-            return self._fallback_signal(
-                analysis_result,
-                reason="trained signal model was not found.",
-            )
-
-        features = analysis_result.get("features_for_model") or {}
-
-        missing_features = [
-            col for col in self.feature_columns
-            if features.get(col) is None
-        ]
-
-        if len(missing_features) > 3:
-            return self._fallback_signal(
-                analysis_result,
-                reason=f"too many model features are missing: {missing_features}.",
-            )
-
+    def _load_model(self) -> Optional[Dict[str, Any]]:
+        if not self.model_path.exists() or self.model_path.stat().st_size == 0:
+            return None
         try:
-            model_bundle = joblib.load(self.model_path)
-            model = model_bundle["model"]
-            feature_columns = model_bundle.get("feature_columns", self.feature_columns)
+            bundle = joblib.load(self.model_path)
+            if isinstance(bundle, dict) and bundle.get("model") is not None:
+                self.model_bundle = bundle
+                return bundle
+            # Backward compatibility with old files that stored only the model.
+            self.model_bundle = {"model": bundle, "feature_columns": self.feature_columns, "model_version": "legacy"}
+            return self.model_bundle
+        except Exception:
+            return None
 
-            model_input = {}
+    def model_exists(self) -> bool:
+        return self.model_path.exists()
 
-            for col in feature_columns:
-                value = features.get(col)
-                model_input[col] = 0.0 if value is None else float(value)
+    def load_existing_model_info(self) -> Dict[str, Any]:
+        bundle = self._load_model()
+        if not bundle:
+            return {"success": False, "summary": "No existing signal model was found."}
+        return {
+            "success": True,
+            "agent": "Training Agent",
+            "model_source": "loaded_existing_model",
+            "model_path": str(self.model_path),
+            "model_version": bundle.get("model_version", "unknown"),
+            "best_params": bundle.get("best_params", {}),
+            "label_distribution": bundle.get("label_distribution", {}),
+            "summary": f"Loaded existing signal model from {self.model_path}.",
+        }
 
-            X = pd.DataFrame([model_input])
+    def train_or_load_model(self, historical_data: Optional[Dict[str, Any]] = None, symbol: Optional[str] = None, force_retrain: bool = False) -> Dict[str, Any]:
+        self._set_symbol_model_path(symbol or (historical_data or {}).get("symbol"))
+        existing = self._load_model()
+        if existing and not force_retrain and existing.get("model_version") == self.MODEL_VERSION:
+            return self.load_existing_model_info()
+        if historical_data and historical_data.get("success"):
+            try:
+                return self._auto_train(historical_data, symbol=symbol or historical_data.get("symbol"))
+            except Exception as exc:
+                if existing:
+                    return {
+                        "success": True,
+                        "agent": "Training Agent",
+                        "model_source": "loaded_existing_after_auto_train_failed",
+                        "model_path": str(self.model_path),
+                        "warning": str(exc),
+                        "summary": "Automatic training failed, so the existing model was kept.",
+                    }
+                return {"success": False, "agent": "Training Agent", "error": str(exc), "summary": "Training Agent could not train a signal model."}
+        if existing:
+            return self.load_existing_model_info()
+        return {"success": False, "agent": "Training Agent", "summary": "No model and no usable historical data were available."}
 
-            raw_prediction = str(model.predict(X)[0])
+    # Backward-compatible training aliases
+    def train_or_load_signal_model(self, historical_data=None, symbol=None, force_retrain=False):
+        return self.train_or_load_model(historical_data, symbol, force_retrain)
 
-            prediction_confidence = None
-            probabilities = {}
+    def load_or_train_model(self, historical_data=None, symbol=None, force_retrain=False):
+        return self.train_or_load_model(historical_data, symbol, force_retrain)
 
-            if hasattr(model, "predict_proba"):
-                proba = model.predict_proba(X)[0]
-                classes = model.classes_
+    def train_model(self, historical_data=None, symbol=None, force_retrain=True):
+        return self.train_or_load_model(historical_data, symbol, force_retrain)
 
-                probabilities = {
-                    str(cls): round(float(prob), 3)
-                    for cls, prob in zip(classes, proba)
-                }
+    def run_training(self, historical_data=None, symbol=None, force_retrain=False):
+        return self.train_or_load_model(historical_data, symbol, force_retrain)
 
-                prediction_confidence = max(probabilities.values())
+    def run(self, historical_data=None, symbol=None, force_retrain=False):
+        return self.train_or_load_model(historical_data, symbol, force_retrain)
 
-            refined = self._refine_signal(
-                raw_signal=raw_prediction,
-                prediction_confidence=prediction_confidence,
-                probabilities=probabilities,
-                analysis_result=analysis_result,
-                features=features,
+    def train_from_historical_data(self, historical_data: Dict[str, Any]) -> Dict[str, Any]:
+        return self.train_or_load_model(historical_data=historical_data, symbol=historical_data.get("symbol"), force_retrain=True)
+
+    def train_from_csv(self, csv_path: str = "data/historical_data.csv") -> Dict[str, Any]:
+        df = pd.read_csv(csv_path)
+        historical_data = {"success": True, "symbol": "CSV", "prices": df.to_dict("records")}
+        return self.train_or_load_model(historical_data=historical_data, symbol="CSV", force_retrain=True)
+
+    def train_from_price_records(self, price_records: list) -> Dict[str, Any]:
+        historical_data = {"success": True, "symbol": "RECORDS", "prices": price_records}
+        return self.train_or_load_model(historical_data=historical_data, symbol="RECORDS", force_retrain=True)
+
+    # ------------------------------------------------------------------
+    # Prediction and context refinement
+    # ------------------------------------------------------------------
+    def _feature_from_analysis(self, analysis_result: Dict[str, Any]) -> pd.DataFrame:
+        feature_source = analysis_result.get("features_for_model") if isinstance(analysis_result, dict) else {}
+        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        row = {}
+        for col in self.feature_columns:
+            row[col] = self._safe_float(
+                (feature_source or {}).get(col, stage2.get(col)),
+                0.0 if col != "rsi_14" else 50.0,
             )
+        if row.get("validation_confidence_score", 0.0) == 0.0:
+            row["validation_confidence_score"] = 0.6
+        return pd.DataFrame([row], columns=self.feature_columns)
 
-            confidence_level = refined["confidence_level"]
+    def _confidence_level(self, confidence: float) -> str:
+        if confidence >= 0.66:
+            return "High"
+        if confidence >= 0.45:
+            return "Medium"
+        return "Low"
 
-            return {
+    def _predict_raw(self, X: pd.DataFrame) -> Tuple[str, float, Dict[str, float]]:
+        bundle = self.model_bundle or self._load_model()
+        if not bundle:
+            raise ValueError("No signal model is loaded.")
+        model = bundle.get("model")
+        raw_signal = str(model.predict(X)[0])
+        probabilities: Dict[str, float] = {}
+        confidence = 0.50
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(X)[0]
+            classes = list(model.classes_)
+            probabilities = {str(cls): float(p) for cls, p in zip(classes, proba)}
+            confidence = max(probabilities.values()) if probabilities else 0.50
+        return raw_signal, float(confidence), probabilities
+
+    def _context(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        return {
+            "analyst_signal": str(analysis_result.get("analyst_signal", "NEUTRAL")).upper(),
+            "analyst_score": self._safe_float(analysis_result.get("analyst_score"), 0.5),
+            "trend_direction": analysis_result.get("trend_direction") or stage2.get("trend_direction", "Neutral"),
+            "entry_risk_level": analysis_result.get("entry_risk_level") or stage2.get("entry_risk_level", "Medium"),
+            "volatility_level": analysis_result.get("volatility_level") or stage2.get("volatility_level", "Unknown"),
+            "return_20": self._safe_float(stage2.get("return_20"), 0.0),
+            "ma_gap": self._safe_float(stage2.get("ma_gap"), 0.0),
+            "rsi_14": self._safe_float(stage2.get("rsi_14"), 50.0),
+        }
+
+    def _refine_signal(self, raw_signal: str, confidence: float, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        ctx = self._context(analysis_result)
+        trend_positive = ctx["trend_direction"] == "Positive" or (ctx["return_20"] > 0.03 and ctx["ma_gap"] > 0)
+        entry_high = ctx["entry_risk_level"] == "High" or ctx["rsi_14"] >= 72
+        entry_medium = ctx["entry_risk_level"] in ["Medium", "High"] or ctx["rsi_14"] >= 68
+        analyst_bullish = "BULLISH" in ctx["analyst_signal"] or "POSITIVE" in ctx["analyst_signal"] or ctx["analyst_score"] >= 0.62
+
+        final_signal = raw_signal if raw_signal in self.CORE_SIGNALS else "HOLD"
+        display_signal = final_signal
+        reason = f"Raw model predicted {raw_signal}."
+
+        if final_signal == "BUY_CANDIDATE" and entry_high:
+            final_signal = "HOLD"
+            display_signal = "BUY_WATCHLIST_OVERBOUGHT"
+            reason = "The model was bullish, but the current entry risk is high, so it was softened to HOLD."
+        elif final_signal == "SELL_RISK" and trend_positive and analyst_bullish and confidence < 0.70:
+            final_signal = "HOLD"
+            display_signal = "BUY_WATCHLIST_ENTRY_RISK"
+            reason = "The raw model saw pullback risk, but the broader trend is positive, so the output was softened to HOLD."
+        elif final_signal == "HOLD" and trend_positive and analyst_bullish:
+            display_signal = "BUY_WATCHLIST_OVERBOUGHT" if entry_medium else "BULLISH_WATCHLIST"
+            reason = "The model is neutral, while the technical context is positive. This is treated as a watchlist setup."
+        elif final_signal == "SELL_RISK" and trend_positive:
+            display_signal = "PULLBACK_RISK_IN_UPTREND"
+            reason = "The model sees short-term pullback risk inside a positive trend."
+        elif final_signal == "BUY_CANDIDATE":
+            display_signal = "BUY_RESEARCH_CANDIDATE"
+            reason = "The model found a positive setup that needs human review."
+        elif final_signal == "SELL_RISK":
+            display_signal = "DOWNSIDE_RISK"
+            reason = "The model found downside risk."
+
+        return {
+            "model_signal": final_signal,
+            "display_signal": display_signal,
+            "refinement_reason": reason,
+            "context": ctx,
+        }
+
+    def _fallback_signal(self, analysis_result: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        score = self._safe_float(analysis_result.get("analyst_score"), 0.5)
+        analyst_signal = str(analysis_result.get("analyst_signal", "NEUTRAL")).upper()
+        entry_risk = analysis_result.get("entry_risk_level", "Medium")
+        if "BEARISH" in analyst_signal or score <= 0.35:
+            signal, display = "SELL_RISK", "DOWNSIDE_RISK"
+        elif ("BULLISH" in analyst_signal or "POSITIVE" in analyst_signal or score >= 0.62) and entry_risk != "High":
+            signal, display = "BUY_CANDIDATE", "BUY_RESEARCH_CANDIDATE"
+        elif "BULLISH" in analyst_signal or "POSITIVE" in analyst_signal or score >= 0.58:
+            signal, display = "HOLD", "BUY_WATCHLIST_ENTRY_RISK"
+        else:
+            signal, display = "HOLD", "HOLD"
+        return {
+            "success": True,
+            "agent": "Training Agent",
+            "agent_goal": "Generate a signal from available analyst context.",
+            "signal_source": "context_fallback",
+            "model_signal": signal,
+            "display_signal": display,
+            "raw_model_signal": "N/A",
+            "prediction_confidence": round(score, 4),
+            "confidence_level": "Medium",
+            "agent_decision": f"Used analyst-context fallback because {reason}",
+            "signal_for_next_agent": {
+                "signal": signal,
+                "display_signal": display,
+                "prediction_confidence": round(score, 4),
+                "confidence_level": "Medium",
+            },
+            "summary": f"Fallback signal generated: {display}.",
+        }
+
+    def generate_signal(self, analysis_result: Dict[str, Any], training_result: Optional[Dict[str, Any]] = None, symbol: Optional[str] = None) -> Dict[str, Any]:
+        self._set_symbol_model_path(symbol or analysis_result.get("symbol"))
+        try:
+            X = self._feature_from_analysis(analysis_result)
+            raw_signal, confidence, probabilities = self._predict_raw(X)
+            refined = self._refine_signal(raw_signal, confidence, analysis_result)
+            confidence_level = self._confidence_level(confidence)
+            result = {
                 "success": True,
-                "agent_goal": "Generate a trading signal from analyst features using a trained model.",
-                "signal_source": "trained_signal_model_with_context_refinement",
+                "agent": "Training Agent",
+                "agent_goal": "Use the trained model and current context to generate a risk-aware signal.",
+                "symbol": str(symbol or analysis_result.get("symbol", "UNKNOWN")).upper(),
+                "signal_source": "auto_optimized_model",
                 "model_signal": refined["model_signal"],
-                "raw_model_signal": refined["raw_model_signal"],
-                "core_signal": refined["core_signal"],
-                "enhanced_signal": refined["enhanced_signal"],
                 "display_signal": refined["display_signal"],
-                "prediction_confidence": refined["prediction_confidence"],
+                "raw_model_signal": raw_signal,
+                "prediction_confidence": round(confidence, 4),
                 "confidence_level": confidence_level,
-                "probabilities": probabilities,
-                "market_context": refined["market_context"],
-                "adjustment_applied": refined["adjustment_applied"],
-                "adjustment_reason": refined["adjustment_reason"],
+                "class_probabilities": {k: round(v, 4) for k, v in probabilities.items()},
                 "model_path": str(self.model_path),
+                "context_used": refined["context"],
                 "agent_decision": (
-                    "The trained signal model generated a raw trading signal and the Training Agent "
-                    "then applied context-aware refinement. "
-                    f"Raw signal={refined['raw_model_signal']}; final model signal={refined['model_signal']}; "
-                    f"display signal={refined['display_signal']}; confidence={confidence_level}. "
-                    f"Reason: {refined['adjustment_reason']}"
+                    f"Raw signal={raw_signal}; final model signal={refined['model_signal']}; "
+                    f"display signal={refined['display_signal']}. {refined['refinement_reason']}"
                 ),
                 "signal_for_next_agent": {
-                    "symbol": analysis_result.get("symbol"),
+                    "symbol": str(symbol or analysis_result.get("symbol", "UNKNOWN")).upper(),
                     "signal": refined["model_signal"],
-                    "core_signal": refined["core_signal"],
-                    "enhanced_signal": refined["enhanced_signal"],
                     "display_signal": refined["display_signal"],
-                    "signal_source": "trained_signal_model_with_context_refinement",
-                    "prediction_confidence": refined["prediction_confidence"],
+                    "raw_model_signal": raw_signal,
+                    "prediction_confidence": round(confidence, 4),
                     "confidence_level": confidence_level,
-                    "raw_model_signal": refined["raw_model_signal"],
-                    "probabilities": probabilities,
-                    "analyst_score": analysis_result.get("analyst_score"),
-                    "volatility_level": analysis_result.get("volatility_level"),
-                    "market_context": refined["market_context"],
-                    "adjustment_applied": refined["adjustment_applied"],
-                    "adjustment_reason": refined["adjustment_reason"],
                 },
-                "summary": (
-                    f"Signal model prediction: raw={refined['raw_model_signal']}, "
-                    f"final={refined['model_signal']}, display={refined['display_signal']} "
-                    f"with {confidence_level.lower()} confidence."
-                ),
+                "summary": f"Signal model output: {refined['display_signal']} with {confidence_level.lower()} confidence.",
             }
+            return result
+        except Exception as exc:
+            return self._fallback_signal(analysis_result, reason=str(exc))
 
-        except Exception as e:
-            return self._fallback_signal(
-                analysis_result,
-                reason=f"model prediction failed: {str(e)}.",
-            )
+    # Backward-compatible prediction aliases
+    def generate_trading_signal(self, analysis_result, training_result=None, symbol=None):
+        return self.generate_signal(analysis_result, training_result, symbol)
+
+    def run_signal_model(self, analysis_result, training_result=None, symbol=None):
+        return self.generate_signal(analysis_result, training_result, symbol)
+
+    def predict(self, analysis_result, training_result=None, symbol=None):
+        return self.generate_signal(analysis_result, training_result, symbol)
+
+    def predict_signal(self, analysis_result, training_result=None, symbol=None):
+        return self.generate_signal(analysis_result, training_result, symbol)

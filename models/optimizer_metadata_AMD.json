@@ -1,0 +1,16 @@
+{
+  "symbol": "AMD",
+  "applied_to_main_model": false,
+  "saved_model_path": "models\\optimized_signal_model_AMD.pkl",
+  "best_params": {
+    "family": "ExtraTrees",
+    "n_estimators": 200,
+    "max_depth": 6,
+    "min_samples_leaf": 4
+  },
+  "selection_score": 0.3441,
+  "test_accuracy": 0.28,
+  "balanced_accuracy": 0.435,
+  "macro_f1": 0.2853,
+  "num_samples": 197
+}
