@@ -1,0 +1,257 @@
+{
+  "feature_columns": [
+    "return_1",
+    "return_5",
+    "return_20",
+    "ma_gap",
+    "volatility_20",
+    "volume_change",
+    "rsi_14",
+    "validation_confidence_score"
+  ],
+  "model_version": "auto_walkforward_rf_v4",
+  "symbol": "AAPL",
+  "trained_at_utc": "2026-05-29 16:51:05",
+  "best_candidate": "pooled_rf_balanced",
+  "best_params": {
+    "family": "RandomForest",
+    "n_estimators": 220,
+    "max_depth": 6,
+    "min_samples_leaf": 3,
+    "scope": "pooled_local_cache"
+  },
+  "training_scope": "pooled_local_cache",
+  "selection_score": 0.4012654320308214,
+  "model_selection_score": {
+    "score": 0.4012654320308214,
+    "accuracy": 0.45217391304347826,
+    "balanced_accuracy": 0.4170665091902266,
+    "macro_f1": 0.39728834169326643,
+    "sell_risk_recall": 0.25806451612903225,
+    "num_folds": 5,
+    "total_test_size": 115,
+    "folds": [
+      {
+        "fold": 1,
+        "train_size": 2444,
+        "test_size": 23,
+        "accuracy": 0.5652173913043478,
+        "balanced_accuracy": 0.5,
+        "macro_f1": 0.3611111111111111,
+        "sell_risk_recall": 0.0,
+        "score": 0.41443236714975845
+      },
+      {
+        "fold": 2,
+        "train_size": 2467,
+        "test_size": 23,
+        "accuracy": 0.43478260869565216,
+        "balanced_accuracy": 0.4212962962962963,
+        "macro_f1": 0.4385964912280702,
+        "sell_risk_recall": 0.3333333333333333,
+        "score": 0.42125233070599205
+      },
+      {
+        "fold": 3,
+        "train_size": 2490,
+        "test_size": 23,
+        "accuracy": 0.4782608695652174,
+        "balanced_accuracy": 0.517094017094017,
+        "macro_f1": 0.5222222222222223,
+        "sell_risk_recall": 0.38461538461538464,
+        "score": 0.49787439613526563
+      },
+      {
+        "fold": 4,
+        "train_size": 2513,
+        "test_size": 23,
+        "accuracy": 0.5217391304347826,
+        "balanced_accuracy": 0.33888888888888885,
+        "macro_f1": 0.27777777777777773,
+        "sell_risk_recall": 0.0,
+        "score": 0.3201811594202898
+      },
+      {
+        "fold": 5,
+        "train_size": 2536,
+        "test_size": 23,
+        "accuracy": 0.2608695652173913,
+        "balanced_accuracy": 0.5714285714285715,
+        "macro_f1": 0.2253968253968254,
+        "sell_risk_recall": 1.0,
+        "score": 0.4310628019323671
+      }
+    ],
+    "confusion_matrix": {
+      "labels": [
+        "BUY_CANDIDATE",
+        "HOLD",
+        "SELL_RISK"
+      ],
+      "matrix": [
+        [
+          8,
+          24,
+          6
+        ],
+        [
+          5,
+          36,
+          5
+        ],
+        [
+          0,
+          23,
+          8
+        ]
+      ]
+    },
+    "classification_report": {
+      "BUY_CANDIDATE": {
+        "precision": 0.6153846153846154,
+        "recall": 0.21052631578947367,
+        "f1-score": 0.3137254901960784,
+        "support": 38.0
+      },
+      "HOLD": {
+        "precision": 0.43373493975903615,
+        "recall": 0.782608695652174,
+        "f1-score": 0.5581395348837209,
+        "support": 46.0
+      },
+      "SELL_RISK": {
+        "precision": 0.42105263157894735,
+        "recall": 0.25806451612903225,
+        "f1-score": 0.32,
+        "support": 31.0
+      },
+      "accuracy": 0.45217391304347826,
+      "macro avg": {
+        "precision": 0.49005739557419964,
+        "recall": 0.4170665091902266,
+        "f1-score": 0.39728834169326643,
+        "support": 115.0
+      },
+      "weighted avg": {
+        "precision": 0.49033960167372537,
+        "recall": 0.45217391304347826,
+        "f1-score": 0.41318249767045345,
+        "support": 115.0
+      }
+    },
+    "pred_distribution": {
+      "HOLD": 83,
+      "SELL_RISK": 19,
+      "BUY_CANDIDATE": 13
+    },
+    "true_distribution": {
+      "HOLD": 46,
+      "BUY_CANDIDATE": 38,
+      "SELL_RISK": 31
+    }
+  },
+  "baseline_score": {
+    "accuracy": 0.28695652173913044,
+    "balanced_accuracy": 0.23913043478260868,
+    "macro_f1": 0.15942028985507248,
+    "sell_risk_recall": 0.0,
+    "score": 0.1968840579710145
+  },
+  "label_distribution": {
+    "HOLD": 78,
+    "BUY_CANDIDATE": 75,
+    "SELL_RISK": 44
+  },
+  "pooled_data_info": {
+    "enabled": true,
+    "used_symbols": [
+      "ADBE",
+      "AMAT",
+      "AMD",
+      "AMZN",
+      "AVGO",
+      "BABA",
+      "BAC",
+      "COST",
+      "CRM",
+      "CSCO",
+      "DIS",
+      "GOOGL"
+    ],
+    "num_pooled_rows": 2364,
+    "skipped_files": []
+  },
+  "feature_importance": [
+    {
+      "feature": "volatility_20",
+      "importance": 0.2068
+    },
+    {
+      "feature": "return_5",
+      "importance": 0.168551
+    },
+    {
+      "feature": "return_20",
+      "importance": 0.147519
+    },
+    {
+      "feature": "ma_gap",
+      "importance": 0.132999
+    },
+    {
+      "feature": "volume_change",
+      "importance": 0.130358
+    },
+    {
+      "feature": "rsi_14",
+      "importance": 0.10765
+    },
+    {
+      "feature": "return_1",
+      "importance": 0.106122
+    },
+    {
+      "feature": "validation_confidence_score",
+      "importance": 0.0
+    }
+  ],
+  "feature_snapshot": {
+    "return_1": {
+      "mean": 0.0017132051140530357,
+      "std": 0.014184062751451473
+    },
+    "return_5": {
+      "mean": 0.009875422853155597,
+      "std": 0.035337111803928456
+    },
+    "return_20": {
+      "mean": 0.0332619213092863,
+      "std": 0.06122864205332601
+    },
+    "ma_gap": {
+      "mean": 0.01970244665445898,
+      "std": 0.030014764599819364
+    },
+    "volatility_20": {
+      "mean": 0.014216716006430402,
+      "std": 0.0038174931916421942
+    },
+    "volume_change": {
+      "mean": -0.005675946499391339,
+      "std": 0.1988280017997686
+    },
+    "rsi_14": {
+      "mean": 55.39816148471778,
+      "std": 18.65192365177262
+    },
+    "validation_confidence_score": {
+      "mean": 0.9499999999999998,
+      "std": 1.1102230246251565e-16
+    }
+  },
+  "feature_drift": {
+    "drift_level": "No baseline",
+    "max_abs_z_like_shift": 0.0,
+    "details": []
+  }
+}
