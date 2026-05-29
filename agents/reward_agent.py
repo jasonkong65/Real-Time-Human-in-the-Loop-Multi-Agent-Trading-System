@@ -157,6 +157,212 @@ class RewardAgent:
     # --------------------------------------------------
     # SQLite schema
     # --------------------------------------------------
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> List[str]:
+        """Return existing column names for a SQLite table."""
+        try:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            return [str(row["name"]) for row in rows]
+        except Exception:
+            return []
+
+    def _add_missing_columns(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_specs: Dict[str, str],
+    ) -> None:
+        """
+        Add missing columns to an existing table.
+
+        This is deliberately conservative:
+        - It never drops or renames old columns.
+        - It only adds nullable columns, so existing user data is preserved.
+        - It lets older StorageAgent schemas coexist with the RewardAgent schema.
+        """
+        existing = set(self._table_columns(conn, table_name))
+        for column_name, column_type in column_specs.items():
+            if column_name not in existing:
+                conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+    def _backfill_legacy_schema(self, conn: sqlite3.Connection) -> None:
+        """
+        Backfill values when the database was first created by an older StorageAgent.
+
+        Older tables may have columns such as:
+        - paper_decisions.status instead of paper_decisions.paper_status
+        - reward_updates.id instead of reward_updates.update_id
+        - reward_updates.due_at_utc instead of reward_updates.target_date_utc
+        - reward_updates.reward_horizon_days instead of reward_updates.horizon_days
+
+        The new RewardAgent uses target_date_utc/update_id/horizon_days. Without this
+        migration, Streamlit can crash during __init__ when an index references a
+        column that does not exist.
+        """
+        paper_cols = set(self._table_columns(conn, "paper_decisions"))
+        reward_cols = set(self._table_columns(conn, "reward_updates"))
+
+        if "paper_status" in paper_cols:
+            if "status" in paper_cols:
+                conn.execute(
+                    """
+                    UPDATE paper_decisions
+                    SET paper_status = COALESCE(NULLIF(paper_status, ''), NULLIF(status, ''), 'PAPER_MONITOR_ONLY')
+                    WHERE paper_status IS NULL OR paper_status = ''
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE paper_decisions
+                    SET paper_status = COALESCE(NULLIF(paper_status, ''), 'PAPER_MONITOR_ONLY')
+                    WHERE paper_status IS NULL OR paper_status = ''
+                    """
+                )
+
+        if "entry_time_utc" in paper_cols:
+            if "created_at_utc" in paper_cols:
+                conn.execute(
+                    """
+                    UPDATE paper_decisions
+                    SET entry_time_utc = COALESCE(NULLIF(entry_time_utc, ''), created_at_utc, datetime('now'))
+                    WHERE entry_time_utc IS NULL OR entry_time_utc = ''
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE paper_decisions
+                    SET entry_time_utc = COALESCE(NULLIF(entry_time_utc, ''), datetime('now'))
+                    WHERE entry_time_utc IS NULL OR entry_time_utc = ''
+                    """
+                )
+
+        if "risk_result_json" in paper_cols and "raw_json" in paper_cols:
+            conn.execute(
+                """
+                UPDATE paper_decisions
+                SET risk_result_json = COALESCE(NULLIF(risk_result_json, ''), raw_json)
+                WHERE risk_result_json IS NULL OR risk_result_json = ''
+                """
+            )
+
+        if "update_id" in reward_cols:
+            if "id" in reward_cols:
+                conn.execute(
+                    """
+                    UPDATE reward_updates
+                    SET update_id = COALESCE(NULLIF(update_id, ''), id)
+                    WHERE update_id IS NULL OR update_id = ''
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE reward_updates
+                    SET update_id = COALESCE(NULLIF(update_id, ''), lower(hex(randomblob(16))))
+                    WHERE update_id IS NULL OR update_id = ''
+                    """
+                )
+
+        if "target_date_utc" in reward_cols:
+            if "due_at_utc" in reward_cols:
+                conn.execute(
+                    """
+                    UPDATE reward_updates
+                    SET target_date_utc = COALESCE(NULLIF(target_date_utc, ''), due_at_utc)
+                    WHERE target_date_utc IS NULL OR target_date_utc = ''
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE reward_updates
+                    SET target_date_utc = COALESCE(NULLIF(target_date_utc, ''), created_at_utc, updated_at_utc, datetime('now'))
+                    WHERE target_date_utc IS NULL OR target_date_utc = ''
+                    """
+                )
+
+        if "horizon_days" in reward_cols:
+            if "reward_horizon_days" in reward_cols:
+                conn.execute(
+                    """
+                    UPDATE reward_updates
+                    SET horizon_days = COALESCE(horizon_days, reward_horizon_days)
+                    WHERE horizon_days IS NULL
+                    """
+                )
+            conn.execute(
+                """
+                UPDATE reward_updates
+                SET horizon_days = COALESCE(horizon_days, 1)
+                WHERE horizon_days IS NULL
+                """
+            )
+
+        if "horizon_display" in reward_cols and "horizon_label" in reward_cols:
+            conn.execute(
+                """
+                UPDATE reward_updates
+                SET horizon_display = COALESCE(NULLIF(horizon_display, ''), horizon_label)
+                WHERE horizon_display IS NULL OR horizon_display = ''
+                """
+            )
+
+        if "created_at_utc" in reward_cols:
+            conn.execute(
+                """
+                UPDATE reward_updates
+                SET created_at_utc = COALESCE(NULLIF(created_at_utc, ''), updated_at_utc, target_date_utc, datetime('now'))
+                WHERE created_at_utc IS NULL OR created_at_utc = ''
+                """
+            )
+
+    def _migrate_existing_db(self, conn: sqlite3.Connection) -> None:
+        """
+        Make an existing trading_system.db compatible with the current RewardAgent.
+
+        This fixes databases previously created by older app/StorageAgent versions, where
+        reward_updates did not have target_date_utc. It preserves all existing rows.
+        """
+        paper_specs = {
+            "symbol": "TEXT",
+            "entry_price": "REAL",
+            "entry_time_utc": "TEXT",
+            "q_state": "TEXT",
+            "risk_action": "TEXT",
+            "final_signal": "TEXT",
+            "risk_level": "TEXT",
+            "paper_status": "TEXT",
+            "duplicate_group_key": "TEXT",
+            "risk_result_json": "TEXT",
+            "created_at_utc": "TEXT",
+            "updated_at_utc": "TEXT",
+        }
+        reward_specs = {
+            "update_id": "TEXT",
+            "decision_id": "TEXT",
+            "symbol": "TEXT",
+            "horizon_label": "TEXT",
+            "horizon_display": "TEXT",
+            "horizon_days": "INTEGER",
+            "target_date_utc": "TEXT",
+            "status": "TEXT",
+            "entry_price": "REAL",
+            "latest_close": "REAL",
+            "latest_date": "TEXT",
+            "future_return": "REAL",
+            "reward": "REAL",
+            "updated_at_utc": "TEXT",
+            "dqn_update_json": "TEXT",
+            "dqn_update_summary": "TEXT",
+            "notes": "TEXT",
+            "created_at_utc": "TEXT",
+        }
+
+        self._add_missing_columns(conn, "paper_decisions", paper_specs)
+        self._add_missing_columns(conn, "reward_updates", reward_specs)
+        self._backfill_legacy_schema(conn)
+
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -203,8 +409,14 @@ class RewardAgent:
                 )
                 """
             )
+
+            # If an older StorageAgent created these tables first, CREATE TABLE IF NOT EXISTS
+            # will not change their columns. Run a compatibility migration before indexes.
+            self._migrate_existing_db(conn)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_status_target ON reward_updates(status, target_date_utc)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_symbol ON reward_updates(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_decision ON reward_updates(decision_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_paper_decisions_symbol_status ON paper_decisions(symbol, paper_status)")
 
     # --------------------------------------------------

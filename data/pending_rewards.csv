@@ -1,8 +1,2 @@
-decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,status
-06b6a346,AMD,495.54,2026-05-28 03:39:56,High|Very High|HOLD|HIGH_VOLATILITY_CAUTION|Medium|EntryRisk,KEEP_SIGNAL,HOLD,Medium,pending
-57d60f31,BABA,127.76,2026-05-28 03:49:47,High|Medium|SELL_RISK|BEARISH_RISK|Low|NoEntryRisk,KEEP_SIGNAL,SELL_RISK,High,pending
-d3d2b1aa,AAPL,312.51,2026-05-29 00:50:02,symbol=AAPL|validation=High|model=HOLD|model_conf=Medium|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,DOWNGRADE_TO_HOLD,HOLD,Low,pending
-510b86d3,MSFT,426.99,2026-05-29 00:57:29,symbol=MSFT|validation=High|model=SELL_RISK|model_conf=Low|analyst=NEUTRAL|trend=Neutral|entry_risk=Medium|volatility=Low,KEEP_SIGNAL,SELL_RISK,Medium,pending
-20927cc9,AMD,518.09,2026-05-29 00:59:19,symbol=AMD|validation=High|model=HOLD|model_conf=Low|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=High,DOWNGRADE_TO_HOLD,HOLD,High,pending
-5d95cf26,AAPL,312.51,2026-05-29 05:25:27,symbol=AAPL|validation=High|model=HOLD|model_conf=Medium|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,DOWNGRADE_TO_HOLD,HOLD,Low,pending
-7a8acf61,AAPL,312.51,2026-05-29 05:30:29,symbol=AAPL|validation=High|model=HOLD|model_conf=Medium|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,DOWNGRADE_TO_HOLD,HOLD,Low,pending
+decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,paper_status,open_horizons,next_target_date_utc
+7a8acf61,AAPL,312.51,2026-05-29 05:30:29,,DOWNGRADE_TO_HOLD,HOLD,Low,pending,,

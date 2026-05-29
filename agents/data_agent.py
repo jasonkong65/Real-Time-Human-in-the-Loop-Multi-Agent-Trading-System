@@ -660,6 +660,7 @@ class DataAgent:
     # ------------------------------------------------------------------
     def get_multi_source_quote(self, symbol: str) -> Dict[str, Any]:
         symbol = str(symbol or "").upper().strip()
+        request_id = str(uuid.uuid4())
         market_status = self.get_market_status()
 
         finnhub = self.get_finnhub_quote(symbol)

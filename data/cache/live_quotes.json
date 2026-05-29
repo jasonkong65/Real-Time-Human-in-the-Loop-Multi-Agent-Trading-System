@@ -1,31 +1,37 @@
 {
   "finnhub:AAPL": {
-    "cached_at": 1780032627.8949406,
+    "cached_at": 1780067803.3063953,
+    "ttl_seconds": 30,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "AAPL",
-      "current_price": 312.51,
-      "open_price": 310.68,
-      "high_price": 312.8,
-      "low_price": 309.57,
-      "previous_close": 310.85,
-      "timestamp": 1779998400,
+      "current_price": 311.28,
+      "open_price": 311.49249999999995,
+      "high_price": 315.0,
+      "low_price": 310.42,
+      "previous_close": 312.51,
+      "timestamp": 1780067790,
+      "timestamp_iso": "2026-05-29T15:16:30+00:00",
+      "data_age_seconds": 13.31,
+      "attempts": 1,
       "raw_response": {
-        "c": 312.51,
-        "d": 1.66,
-        "dp": 0.534,
-        "h": 312.8,
-        "l": 309.57,
-        "o": 310.68,
-        "pc": 310.85,
-        "t": 1779998400
+        "c": 311.28,
+        "d": -1.23,
+        "dp": -0.3936,
+        "h": 315,
+        "l": 310.42,
+        "o": 311.49249999999995,
+        "pc": 312.51,
+        "t": 1780067790
       },
-      "from_cache": false
+      "from_cache": false,
+      "cache_ttl_seconds": 30
     }
   },
   "alpha_vantage:AAPL": {
-    "cached_at": 1780032628.3213356,
+    "cached_at": 1780067768.8827593,
+    "ttl_seconds": 300,
     "payload": {
       "source": "Alpha Vantage",
       "success": true,
@@ -36,6 +42,7 @@
       "low_price": 309.57,
       "previous_close": 310.85,
       "latest_trading_day": "2026-05-28",
+      "attempts": 1,
       "raw_response": {
         "Global Quote": {
           "01. symbol": "AAPL",
@@ -50,7 +57,8 @@
           "10. change percent": "0.5340%"
         }
       },
-      "from_cache": false
+      "from_cache": false,
+      "cache_ttl_seconds": 300
     }
   },
   "finnhub:MSFT": {
