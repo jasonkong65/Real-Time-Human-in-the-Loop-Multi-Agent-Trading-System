@@ -1,5 +1,7 @@
 import json
+import sqlite3
 import traceback
+from pathlib import Path
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +29,122 @@ except Exception:
 
 
 load_dotenv()
+
+
+CHART_PERIOD_OPTIONS = ["1 Day", "7 Days", "30 Days", "6 Months", "1 Year", "2 Years"]
+CHART_STYLE_OPTIONS = ["Line + moving averages", "Line only"]
+DEFAULT_CHART_LABEL = "1 Year"
+DEFAULT_CHART_STYLE = "Line + moving averages"
+
+
+def repair_sqlite_schema_without_agent_changes(db_path: str = "data/trading_system.db") -> None:
+    """Repair legacy SQLite columns before agents are instantiated.
+
+    This keeps the agents/ folder unchanged while preventing old local
+    trading_system.db files from crashing the current RewardAgent queries.
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return
+
+    def table_exists(conn, name):
+        return conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+
+    def cols(conn, table):
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def add_missing(conn, table, specs):
+        if not table_exists(conn, table):
+            return
+        existing = cols(conn, table)
+        for name, col_type in specs.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+
+    with sqlite3.connect(path) as conn:
+        add_missing(conn, "paper_decisions", {
+            "symbol": "TEXT", "entry_price": "REAL", "entry_time_utc": "TEXT",
+            "q_state": "TEXT", "risk_action": "TEXT", "final_signal": "TEXT",
+            "risk_level": "TEXT", "paper_status": "TEXT", "duplicate_group_key": "TEXT",
+            "risk_result_json": "TEXT", "created_at_utc": "TEXT", "updated_at_utc": "TEXT",
+        })
+        add_missing(conn, "reward_updates", {
+            "update_id": "TEXT", "decision_id": "TEXT", "symbol": "TEXT",
+            "horizon_label": "TEXT", "horizon_display": "TEXT", "horizon_days": "INTEGER",
+            "target_date_utc": "TEXT", "status": "TEXT", "entry_price": "REAL",
+            "latest_close": "REAL", "latest_date": "TEXT", "future_return": "REAL",
+            "reward": "REAL", "updated_at_utc": "TEXT", "dqn_update_json": "TEXT",
+            "dqn_update_summary": "TEXT", "notes": "TEXT", "created_at_utc": "TEXT",
+        })
+
+        if table_exists(conn, "paper_decisions"):
+            p = cols(conn, "paper_decisions")
+            if {"paper_status", "status"}.issubset(p):
+                conn.execute("""
+                    UPDATE paper_decisions
+                    SET paper_status = COALESCE(NULLIF(paper_status, ''), NULLIF(status, ''), 'PAPER_MONITOR_ONLY')
+                    WHERE paper_status IS NULL OR paper_status = ''
+                """)
+            if {"entry_time_utc", "created_at_utc"}.issubset(p):
+                conn.execute("""
+                    UPDATE paper_decisions
+                    SET entry_time_utc = COALESCE(NULLIF(entry_time_utc, ''), created_at_utc, datetime('now'))
+                    WHERE entry_time_utc IS NULL OR entry_time_utc = ''
+                """)
+            if {"risk_result_json", "raw_json"}.issubset(p):
+                conn.execute("""
+                    UPDATE paper_decisions
+                    SET risk_result_json = COALESCE(NULLIF(risk_result_json, ''), raw_json)
+                    WHERE risk_result_json IS NULL OR risk_result_json = ''
+                """)
+
+        if table_exists(conn, "reward_updates"):
+            r = cols(conn, "reward_updates")
+            if {"update_id", "id"}.issubset(r):
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET update_id = COALESCE(NULLIF(update_id, ''), id, lower(hex(randomblob(16))))
+                    WHERE update_id IS NULL OR update_id = ''
+                """)
+            if {"target_date_utc", "due_at_utc"}.issubset(r):
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET target_date_utc = COALESCE(NULLIF(target_date_utc, ''), due_at_utc, updated_at_utc, datetime('now'))
+                    WHERE target_date_utc IS NULL OR target_date_utc = ''
+                """)
+            elif "target_date_utc" in r:
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET target_date_utc = COALESCE(NULLIF(target_date_utc, ''), updated_at_utc, created_at_utc, datetime('now'))
+                    WHERE target_date_utc IS NULL OR target_date_utc = ''
+                """)
+            if {"horizon_days", "reward_horizon_days"}.issubset(r):
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET horizon_days = COALESCE(horizon_days, reward_horizon_days, 1)
+                    WHERE horizon_days IS NULL
+                """)
+            elif "horizon_days" in r:
+                conn.execute("UPDATE reward_updates SET horizon_days = COALESCE(horizon_days, 1) WHERE horizon_days IS NULL")
+            if {"horizon_display", "horizon_label"}.issubset(r):
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET horizon_display = COALESCE(NULLIF(horizon_display, ''), horizon_label)
+                    WHERE horizon_display IS NULL OR horizon_display = ''
+                """)
+            if "created_at_utc" in r:
+                conn.execute("""
+                    UPDATE reward_updates
+                    SET created_at_utc = COALESCE(NULLIF(created_at_utc, ''), updated_at_utc, target_date_utc, datetime('now'))
+                    WHERE created_at_utc IS NULL OR created_at_utc = ''
+                """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_status_target ON reward_updates(status, target_date_utc)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_symbol ON reward_updates(symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reward_updates_decision ON reward_updates(decision_id)")
+        conn.commit()
+
 
 st.set_page_config(
     page_title="Multi-Agent Stock Research System",
@@ -157,6 +275,89 @@ def get_nested(data: Dict[str, Any], keys: List[str], default: Any = None) -> An
     return cur
 
 
+
+def normalise_ohlcv_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame with safe, unique OHLCV/timestamp columns.
+
+    Some finance downloads/cache tables may return duplicate columns or
+    yfinance-style MultiIndex columns. Duplicate labels make expressions like
+    df["close"] return a DataFrame instead of a Series, which then causes
+    pandas.to_numeric(...) to raise: "arg must be a list, tuple, 1-d array, or Series".
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    def clean_col(col: Any) -> str:
+        # Prefer the OHLCV/timestamp part when yfinance returns tuple/MultiIndex columns,
+        # for example ("Close", "AAPL") -> "close".
+        if isinstance(col, tuple):
+            parts = [str(x).strip() for x in col if str(x).strip() and str(x).lower() != "nan"]
+            canonical = {
+                "date", "datetime", "timestamp", "index",
+                "open", "high", "low", "close", "adj close", "adj_close", "adjclose", "volume",
+            }
+            for part in parts:
+                cleaned = part.lower().replace(" ", "_")
+                if cleaned in {c.replace(" ", "_") for c in canonical}:
+                    return cleaned
+            return "_".join(parts).lower().replace(" ", "_")
+        return str(col).strip().lower().replace(" ", "_")
+
+    out.columns = [clean_col(c) for c in out.columns]
+
+    rename_map = {
+        "datetime": "timestamp",
+        "date": "timestamp",
+        "index": "timestamp",
+        "adjclose": "adj_close",
+        "adj_close": "adj_close",
+        "adj__close": "adj_close",
+    }
+    out = out.rename(columns={c: rename_map.get(c, c) for c in out.columns})
+
+    # Handle flattened names such as close_aapl or aapl_close by mapping the first
+    # matching column to the canonical OHLCV name when the canonical name is absent.
+    canonical_cols = ["timestamp", "open", "high", "low", "close", "adj_close", "volume"]
+    for target in canonical_cols:
+        if target in out.columns:
+            continue
+        matches = [
+            c for c in out.columns
+            if c == target or c.startswith(target + "_") or c.endswith("_" + target)
+        ]
+        if matches:
+            out = out.rename(columns={matches[0]: target})
+
+    # After renaming, keep the first occurrence of duplicate columns. This prevents
+    # df["close"] from returning a DataFrame.
+    if out.columns.duplicated().any():
+        out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    return out
+
+
+def first_series(df: pd.DataFrame, column: Any) -> pd.Series:
+    """Safely return one column as a Series even if duplicate labels exist."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or column is None:
+        return pd.Series(dtype="float64")
+    try:
+        data = df.loc[:, column]
+    except Exception:
+        try:
+            data = df[column]
+        except Exception:
+            return pd.Series(dtype="float64")
+    if isinstance(data, pd.DataFrame):
+        if data.shape[1] == 0:
+            return pd.Series(dtype="float64")
+        data = data.iloc[:, 0]
+    if not isinstance(data, pd.Series):
+        data = pd.Series(data)
+    return data
+
+
 def call_agent_method(agent: Any, method_names: List[str], *args, **kwargs) -> Any:
     errors = []
     for method_name in method_names:
@@ -214,29 +415,25 @@ def historical_to_dataframe(historical_data: Dict[str, Any]) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Normalise column names lightly while preserving original data.
-    rename_map = {}
-    for col in df.columns:
-        lower = str(col).strip().lower().replace(" ", "_")
-        if lower in ["datetime", "date", "timestamp", "index"]:
-            rename_map[col] = "timestamp"
-        elif lower in ["open", "high", "low", "close", "adj_close", "volume"]:
-            rename_map[col] = lower
-        elif lower == "adj close":
-            rename_map[col] = "adj_close"
-    df = df.rename(columns=rename_map)
+    df = normalise_ohlcv_columns(df)
+    if df.empty:
+        return df
 
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        ts = pd.to_datetime(first_series(df, "timestamp"), errors="coerce")
+        df = df.assign(timestamp=ts)
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
         df = df.set_index("timestamp")
 
+    # Ensure duplicate labels cannot break pd.to_numeric.
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+
     for col in ["open", "high", "low", "close", "adj_close", "volume"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(first_series(df, col), errors="coerce")
 
     return df
-
 
 def chart_preset(label: str) -> Tuple[str, str]:
     presets = {
@@ -248,6 +445,86 @@ def chart_preset(label: str) -> Tuple[str, str]:
         "2 Years": ("2y", "1d"),
     }
     return presets.get(label, ("1y", "1d"))
+
+
+def ensure_live_chart_state() -> None:
+    """Keep chart controls independent from the full agent pipeline.
+
+    The chart widgets live under the chart. Changing them should trigger only
+    a lightweight chart refresh on the next Streamlit rerun, not a full
+    Data/Analyst/Training/Risk pipeline run.
+    """
+    if st.session_state.get("live_chart_label") not in CHART_PERIOD_OPTIONS:
+        st.session_state["live_chart_label"] = DEFAULT_CHART_LABEL
+    if st.session_state.get("live_chart_style") not in CHART_STYLE_OPTIONS:
+        st.session_state["live_chart_style"] = DEFAULT_CHART_STYLE
+    st.session_state.setdefault("chart_refresh_nonce", 0)
+
+
+def get_live_chart_selection() -> Tuple[str, str, str, str]:
+    ensure_live_chart_state()
+    label = st.session_state["live_chart_label"]
+    period, interval = chart_preset(label)
+    style = st.session_state["live_chart_style"]
+    return label, period, interval, style
+
+
+def sync_live_chart_value(source_key: str, target_key: str) -> None:
+    value = st.session_state.get(source_key)
+    if target_key == "live_chart_label" and value in CHART_PERIOD_OPTIONS:
+        st.session_state[target_key] = value
+    elif target_key == "live_chart_style" and value in CHART_STYLE_OPTIONS:
+        st.session_state[target_key] = value
+
+
+def request_chart_refresh() -> None:
+    st.session_state["chart_refresh_nonce"] = int(st.session_state.get("chart_refresh_nonce", 0)) + 1
+    st.session_state["chart_force_refresh_once"] = True
+
+
+def render_live_chart_controls(location_key: str) -> None:
+    """Render duplicate-safe chart controls below a chart.
+
+    We use location-specific widget keys and sync them into the shared
+    live_chart_* state, so the Overview chart and Chart tab can both have
+    controls without Streamlit duplicate-key errors.
+    """
+    ensure_live_chart_state()
+    label_key = f"{location_key}_chart_label_widget"
+    style_key = f"{location_key}_chart_style_widget"
+
+    # Synchronise visible widgets to the shared chart state before creation.
+    if st.session_state.get(label_key) != st.session_state["live_chart_label"]:
+        st.session_state[label_key] = st.session_state["live_chart_label"]
+    if st.session_state.get(style_key) != st.session_state["live_chart_style"]:
+        st.session_state[style_key] = st.session_state["live_chart_style"]
+
+    c1, c2, c3 = st.columns([1.0, 1.2, 1.0])
+    with c1:
+        st.selectbox(
+            "Chart period",
+            CHART_PERIOD_OPTIONS,
+            key=label_key,
+            on_change=sync_live_chart_value,
+            args=(label_key, "live_chart_label"),
+            help="Changing this only refreshes the price chart. It does not rerun the full research pipeline.",
+        )
+    with c2:
+        st.selectbox(
+            "Chart style",
+            CHART_STYLE_OPTIONS,
+            key=style_key,
+            on_change=sync_live_chart_value,
+            args=(style_key, "live_chart_style"),
+        )
+    with c3:
+        st.button(
+            "Refresh chart data",
+            key=f"{location_key}_refresh_chart_button",
+            on_click=request_chart_refresh,
+            use_container_width=True,
+            help="Force a fresh yfinance chart download without rerunning the full pipeline.",
+        )
 
 
 def card(title: str, value: Any, note: Optional[str] = None):
@@ -270,18 +547,28 @@ def render_status_pills(items: List[str]):
 
 
 def render_chart(df: pd.DataFrame, symbol: str, chart_style: str = "Line"):
-    if df.empty:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         st.info("No chart data is available yet.")
         return
 
-    lower_cols = {str(c).lower(): c for c in df.columns}
+    chart_df = normalise_ohlcv_columns(df)
+    if chart_df.empty:
+        st.info("No chart data is available after cleaning.")
+        return
+
+    # Preserve DatetimeIndex from historical_to_dataframe, but also support raw timestamp columns.
+    if "timestamp" in chart_df.columns:
+        ts = pd.to_datetime(first_series(chart_df, "timestamp"), errors="coerce")
+        chart_df = chart_df.assign(timestamp=ts).dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
+
+    lower_cols = {str(c).lower(): c for c in chart_df.columns}
     close_col = lower_cols.get("close") or lower_cols.get("adj_close")
-    if not close_col:
+    if close_col is None:
         st.info("Chart data does not contain close prices.")
         return
 
-    chart_df = df.copy()
-    chart_df["Close"] = pd.to_numeric(chart_df[close_col], errors="coerce")
+    close_series = pd.to_numeric(first_series(chart_df, close_col), errors="coerce")
+    chart_df = chart_df.assign(Close=close_series)
 
     if "Line" in chart_style:
         line_cols = ["Close"]
@@ -297,14 +584,16 @@ def render_chart(df: pd.DataFrame, symbol: str, chart_style: str = "Line"):
 
     if "volume" in lower_cols:
         volume_col = lower_cols["volume"]
-        vol = pd.to_numeric(chart_df[volume_col], errors="coerce")
+        vol = pd.to_numeric(first_series(chart_df, volume_col), errors="coerce")
         if vol.notna().any():
             with st.expander("Volume", expanded=False):
                 st.bar_chart(vol.dropna(), height=180)
 
 
+
 @st.cache_resource(show_spinner=False)
 def load_agents():
+    repair_sqlite_schema_without_agent_changes()
     storage_agent = StorageAgent()
     agents = {
         "data": DataAgent(),
@@ -328,6 +617,79 @@ def load_agents():
     else:
         agents["llm"] = None
     return agents
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_live_chart_data(
+    symbol: str,
+    chart_period: str,
+    chart_interval: str,
+    force_refresh: bool = False,
+    refresh_nonce: int = 0,
+) -> Tuple[Dict[str, Any], pd.DataFrame, str]:
+    """Fetch chart data only, so chart-period changes do not rerun all agents."""
+    agents = load_agents()
+    chart_historical_data = call_agent_method(
+        agents["historical"],
+        ["get_or_download_data", "run"],
+        symbol,
+        chart_period,
+        chart_interval,
+        symbol=symbol,
+        period=chart_period,
+        interval=chart_interval,
+        force_refresh=force_refresh,
+    )
+    chart_df = historical_to_dataframe(chart_historical_data)
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return chart_historical_data, chart_df, fetched_at
+
+
+def get_current_chart_for_display(symbol: str, fallback_bundle: Optional[Dict[str, Any]] = None) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Any]]:
+    """Return chart data using current live chart controls, with safe fallback."""
+    chart_label, chart_period, chart_interval, chart_style = get_live_chart_selection()
+    fallback_bundle = fallback_bundle or {}
+    force_refresh = bool(st.session_state.pop("chart_force_refresh_once", False))
+    refresh_nonce = int(st.session_state.get("chart_refresh_nonce", 0))
+
+    metadata = {
+        "label": chart_label,
+        "period": chart_period,
+        "interval": chart_interval,
+        "style": chart_style,
+        "force_refresh": force_refresh,
+        "fetched_at": None,
+        "source": "not_loaded",
+        "error": None,
+    }
+
+    try:
+        chart_data, chart_df, fetched_at = fetch_live_chart_data(
+            symbol,
+            chart_period,
+            chart_interval,
+            force_refresh=force_refresh,
+            refresh_nonce=refresh_nonce,
+        )
+        metadata.update({
+            "fetched_at": fetched_at,
+            "source": chart_data.get("source") or "historical_agent",
+            "num_records": chart_data.get("num_records"),
+            "latest_timestamp": chart_data.get("latest_timestamp") or chart_data.get("latest_date"),
+            "is_stale": chart_data.get("is_stale"),
+            "warnings": chart_data.get("warnings", []),
+        })
+        return chart_df, chart_data, metadata
+    except Exception as exc:
+        fallback_df = fallback_bundle.get("chart_df")
+        if fallback_df is None:
+            fallback_df = historical_to_dataframe(fallback_bundle.get("chart_historical_data", {}))
+        fallback_data = fallback_bundle.get("chart_historical_data", {}) or {}
+        metadata.update({
+            "source": "fallback_from_last_pipeline_run",
+            "error": str(exc),
+        })
+        return fallback_df, fallback_data, metadata
 
 
 def build_portfolio_context(
@@ -640,6 +1002,9 @@ with st.sidebar:
     st.header("Research Input")
 
     symbol = clean_symbol(st.text_input("Stock symbol", value="AAPL", placeholder="AAPL / MSFT / NVDA"))
+
+    # Keep this selector focused on the user's stock-decision intent only.
+    # News/report and screener workflows are controlled by their own sections below.
     user_intent = st.selectbox(
         "What are you trying to do?",
         [
@@ -647,68 +1012,125 @@ with st.sidebar:
             "Considering a paper buy",
             "Considering a paper sell",
             "Already holding - review risk",
-            "News / report only",
-            "Screener / watchlist only",
         ],
+        help="This describes the stock-decision context. News/report and screener tools are enabled separately below.",
     )
 
-    query_modes = st.multiselect(
-        "What should the system run?",
+    core_query_modes = st.multiselect(
+        "Core stock modules",
         [
             "Single-stock agent pipeline",
             "Price chart",
-            "Financial news / report summary",
-            "Watchlist screener",
             "Evaluator dashboard",
             "Storage / session logs",
         ],
         default=["Single-stock agent pipeline", "Price chart"],
-        key="query_modes",
+        key="core_query_modes",
+        help="Core modules for the selected stock. News/report and screener are separate optional agents below.",
     )
 
-    chart_label = st.selectbox(
-        "Chart period",
-        ["1 Day", "7 Days", "30 Days", "6 Months", "1 Year", "2 Years"],
-        index=4,
+    ensure_live_chart_state()
+    chart_label, chart_period, chart_interval, chart_style = get_live_chart_selection()
+    st.caption(
+        f"Chart: {chart_label} ({chart_period}/{chart_interval}). "
+        "Change the chart period under the chart; it updates without pressing Run."
     )
-    chart_period, chart_interval = chart_preset(chart_label)
-    chart_style = st.selectbox("Chart style", ["Line + moving averages", "Line only"])
 
     st.divider()
-    st.subheader("Portfolio context")
-    has_position = st.checkbox("I currently hold this stock", value=("holding" in user_intent.lower()))
-    shares = st.number_input("Shares / paper quantity", min_value=0.0, value=0.0, step=1.0, disabled=not has_position)
-    average_cost = st.number_input("Average cost", min_value=0.0, value=0.0, step=1.0, disabled=not has_position)
+    with st.expander("Optional portfolio / event context", expanded=False):
+        st.subheader("Portfolio context")
+        has_position = st.checkbox(
+            "I currently hold this stock",
+            value=("holding" in user_intent.lower()),
+            help="Enable this when you want the strategy to consider an existing paper position.",
+        )
+        shares = st.number_input(
+            "Shares / paper quantity",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            disabled=not has_position,
+        )
+        average_cost = st.number_input(
+            "Average cost",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            disabled=not has_position,
+        )
 
-    st.subheader("Event context")
-    earnings_date_text = st.text_input("Next earnings date (optional)", placeholder="YYYY-MM-DD")
-    event_risk = st.selectbox("Event risk", ["Unknown", "Low", "Medium", "High"], index=0)
+        st.subheader("Event context")
+        earnings_date_text = st.text_input("Next earnings date (optional)", placeholder="YYYY-MM-DD")
+        event_risk = st.selectbox("Event risk", ["Unknown", "Low", "Medium", "High"], index=0)
+
+    with st.expander("Model / memory options", expanded=False):
+        force_retrain = st.checkbox(
+            "Force retrain signal model",
+            value=False,
+            help="Useful for demonstrating the Training Agent, but slower for normal demos.",
+        )
+        record_paper_decision = st.checkbox(
+            "Record paper decision / memory",
+            value=True,
+            help="Stores the paper decision for later reward/evaluator analysis.",
+        )
 
     st.divider()
-    force_retrain = st.checkbox("Force retrain signal model", value=False)
-    record_paper_decision = st.checkbox("Record paper decision / memory", value=True)
-
-    st.subheader("News / report options")
-    source_mode = st.selectbox(
-        "Source mode",
-        ["auto", "news", "financial", "news_and_financial", "pasted_text"],
-        index=0,
+    st.subheader("News / Report Agent")
+    run_news_report = st.checkbox(
+        "Run News / Report Agent",
+        value=False,
+        help="Runs the financial news/report summarizer separately from the stock-decision intent.",
     )
-    lookback_days = st.slider("News lookback days", min_value=3, max_value=60, value=14)
-    max_news = st.slider("Max news items", min_value=3, max_value=20, value=8)
-    pasted_financial_text = st.text_area(
-        "Optional pasted report/news text",
-        placeholder="Paste company news, earnings text, or leave blank to fetch source-grounded data.",
-        height=120,
-    )
+    source_mode = "auto"
+    lookback_days = 14
+    max_news = 8
+    pasted_financial_text = ""
+    if run_news_report:
+        source_mode = st.selectbox(
+            "Source mode",
+            ["auto", "news", "financial", "news_and_financial", "pasted_text"],
+            index=0,
+        )
+        lookback_days = st.slider("News lookback days", min_value=3, max_value=60, value=14)
+        max_news = st.slider("Max news items", min_value=3, max_value=20, value=8)
+        pasted_financial_text = st.text_area(
+            "Paste financial news/report text here, not stock symbol",
+            placeholder="Example: Apple reported quarterly earnings... Leave blank to fetch source-grounded data.",
+            height=120,
+        )
+    else:
+        st.caption("Off. Turn this on only when you want company news or report summarisation.")
 
-    st.subheader("Screener options")
+    st.divider()
+    st.subheader("Watchlist Screener Agent")
+    run_screener = st.checkbox(
+        "Run Watchlist Screener",
+        value=False,
+        help="Scans a watchlist and returns top candidates separately from the single-stock workflow.",
+    )
     default_universe = "AAPL, MSFT, NVDA, TSLA, GOOGL, AMZN, META, AMD, NFLX, AVGO, JPM, V, MA, WMT, DIS, INTC, QCOM, CSCO, ORCL"
-    screener_symbols_text = st.text_area("Watchlist symbols", value=default_universe, height=90)
-    top_n = st.slider("Top N", min_value=3, max_value=10, value=5)
+    screener_symbols_text = default_universe
+    top_n = 5
+    if run_screener:
+        screener_symbols_text = st.text_area("Watchlist symbols", value=default_universe, height=90)
+        top_n = st.slider("Top N", min_value=3, max_value=10, value=5)
+    else:
+        st.caption("Off. Turn this on only when you want a Top-N watchlist scan.")
+
+    # Build the actual run list from three independent UI areas:
+    # 1) core stock modules, 2) News / Report Agent, 3) Screener Agent.
+    query_modes = list(core_query_modes)
+    if run_news_report:
+        query_modes.append("Financial news / report summary")
+    if run_screener:
+        query_modes.append("Watchlist screener")
+
+    # Keep the existing session key for downstream logging and ExecutionAgent metadata.
+    st.session_state["query_modes"] = query_modes
+    st.caption("Selected modules: " + (", ".join(query_modes) if query_modes else "None"))
 
     run_button = st.button("Run selected research", type="primary", use_container_width=True)
-
 
 if not symbol and run_button:
     st.error("Please enter a stock symbol.")
@@ -801,13 +1223,25 @@ if run_button:
 
             if "Watchlist screener" in query_modes:
                 screener_symbols = [clean_symbol(s) for s in screener_symbols_text.replace("\n", ",").split(",") if clean_symbol(s)]
-                screener_result = agents["screener"].screen_universe(
-                    symbols=screener_symbols,
-                    top_n=top_n,
-                    period="1y",
-                    interval="1d",
-                    save_to_storage=True,
-                )
+                try:
+                    screener_result = agents["screener"].screen_universe(
+                        symbols=screener_symbols,
+                        top_n=top_n,
+                        period="1y",
+                        interval="1d",
+                        save_to_storage=True,
+                    )
+                except Exception as exc:
+                    # Keep the rest of the app usable if one screener data source
+                    # returns an unexpected dataframe shape. The full traceback is
+                    # still shown inside the Screener tab for debugging.
+                    screener_result = {
+                        "success": False,
+                        "agent": "Screener Agent",
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                        "summary": "Watchlist screener failed, but the single-stock pipeline and chart can still be reviewed.",
+                    }
                 result_bundle["screener_result"] = screener_result
 
             if "Evaluator dashboard" in query_modes:
@@ -856,9 +1290,11 @@ if not bundle:
 
 
 symbol = bundle.get("symbol", "")
-chart_df = bundle.get("chart_df")
-if chart_df is None:
-    chart_df = historical_to_dataframe(bundle.get("chart_historical_data", {}))
+chart_df, live_chart_historical_data, live_chart_metadata = get_current_chart_for_display(symbol, fallback_bundle=bundle)
+live_chart_label = live_chart_metadata.get("label", DEFAULT_CHART_LABEL)
+live_chart_period = live_chart_metadata.get("period", "1y")
+live_chart_interval = live_chart_metadata.get("interval", "1d")
+live_chart_style = live_chart_metadata.get("style", DEFAULT_CHART_STYLE)
 
 risk_result = bundle.get("risk_result", {}) or {}
 strategy_result = bundle.get("strategy_result", {}) or {}
@@ -888,7 +1324,8 @@ with summary_cols[5]:
     card("Strategy", clean_label(strategy_result.get("strategy_action")))
 
 status_items = [
-    f"Chart: {bundle.get('chart_period', '')} / {bundle.get('chart_interval', '')}",
+    f"Chart: {live_chart_label} / {live_chart_period} / {live_chart_interval}",
+    f"Chart source: {live_chart_metadata.get('source', 'Unknown')}",
     f"Validation: {validation_result.get('confidence', 'Unknown')}",
     f"Final signal: {clean_label(risk_result.get('final_signal'))}",
     f"Strategy level: {clean_label(strategy_result.get('strategy_level'))}",
@@ -934,11 +1371,29 @@ with tab_overview:
 
     with right:
         st.markdown("#### Chart Preview")
-        render_chart(chart_df, symbol, chart_style=chart_style)
+        render_chart(chart_df, symbol, chart_style=live_chart_style)
+        render_live_chart_controls("overview")
+        st.caption(
+            f"Displayed period: {live_chart_label} ({live_chart_period}/{live_chart_interval}) · "
+            f"source: {live_chart_metadata.get('source', 'Unknown')} · "
+            f"latest: {live_chart_metadata.get('latest_timestamp') or 'N/A'} · "
+            f"fetched: {live_chart_metadata.get('fetched_at') or 'N/A'}"
+        )
+        if live_chart_metadata.get("error"):
+            st.warning(f"Live chart refresh failed, showing fallback chart: {live_chart_metadata['error']}")
 
 with tab_chart:
     st.markdown(f"#### {symbol} Price Chart")
-    render_chart(chart_df, symbol, chart_style=chart_style)
+    render_chart(chart_df, symbol, chart_style=live_chart_style)
+    render_live_chart_controls("chart_tab")
+    st.caption(
+        f"Displayed period: {live_chart_label} ({live_chart_period}/{live_chart_interval}) · "
+        f"source: {live_chart_metadata.get('source', 'Unknown')} · "
+        f"latest: {live_chart_metadata.get('latest_timestamp') or 'N/A'} · "
+        f"fetched: {live_chart_metadata.get('fetched_at') or 'N/A'}"
+    )
+    if live_chart_metadata.get("error"):
+        st.warning(f"Live chart refresh failed, showing fallback chart: {live_chart_metadata['error']}")
     with st.expander("Chart data preview"):
         if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
             st.dataframe(chart_df.tail(100), use_container_width=True)

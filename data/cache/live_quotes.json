@@ -1,36 +1,36 @@
 {
   "finnhub:AAPL": {
-    "cached_at": 1780067803.3063953,
+    "cached_at": 1780076525.9206991,
     "ttl_seconds": 30,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "AAPL",
-      "current_price": 311.28,
+      "current_price": 309.98,
       "open_price": 311.49249999999995,
       "high_price": 315.0,
-      "low_price": 310.42,
+      "low_price": 309.91,
       "previous_close": 312.51,
-      "timestamp": 1780067790,
-      "timestamp_iso": "2026-05-29T15:16:30+00:00",
-      "data_age_seconds": 13.31,
+      "timestamp": 1780076495,
+      "timestamp_iso": "2026-05-29T17:41:35+00:00",
+      "data_age_seconds": 30.92,
       "attempts": 1,
       "raw_response": {
-        "c": 311.28,
-        "d": -1.23,
-        "dp": -0.3936,
+        "c": 309.98,
+        "d": -2.53,
+        "dp": -0.8096,
         "h": 315,
-        "l": 310.42,
+        "l": 309.91,
         "o": 311.49249999999995,
         "pc": 312.51,
-        "t": 1780067790
+        "t": 1780076495
       },
       "from_cache": false,
       "cache_ttl_seconds": 30
     }
   },
   "alpha_vantage:AAPL": {
-    "cached_at": 1780067768.8827593,
+    "cached_at": 1780076526.8758223,
     "ttl_seconds": 300,
     "payload": {
       "source": "Alpha Vantage",

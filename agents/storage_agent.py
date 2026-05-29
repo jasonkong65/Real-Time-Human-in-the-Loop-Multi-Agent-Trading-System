@@ -128,6 +128,102 @@ class StorageAgent:
         start = datetime.now(timezone.utc) - timedelta(days=days + 5)
         return start.strftime("%Y-%m-%d %H:%M:%S")
 
+    def _ensure_reward_compatible_schema(self) -> None:
+        """
+        Keep StorageAgent and RewardAgent compatible when the same SQLite file
+        has been created by an older version of the app.
+
+        Earlier StorageAgent tables used fields such as reward_updates.due_at_utc
+        and reward_updates.reward_horizon_days. RewardAgent now uses
+        target_date_utc and horizon_days. Without this migration, Streamlit can
+        crash with: sqlite3.OperationalError: no such column: target_date_utc.
+        """
+        paper_specs = {
+            "paper_status": "TEXT",
+            "entry_time_utc": "TEXT",
+            "q_state": "TEXT",
+            "duplicate_group_key": "TEXT",
+            "risk_result_json": "TEXT",
+            "updated_at_utc": "TEXT",
+        }
+        reward_specs = {
+            "update_id": "TEXT",
+            "horizon_display": "TEXT",
+            "horizon_days": "INTEGER",
+            "target_date_utc": "TEXT",
+            "latest_date": "TEXT",
+            "dqn_update_json": "TEXT",
+            "dqn_update_summary": "TEXT",
+            "notes": "TEXT",
+            "created_at_utc": "TEXT",
+        }
+
+        for column, column_type in paper_specs.items():
+            try:
+                self.backend.add_column_if_missing("paper_decisions", column, column_type)
+            except Exception:
+                pass
+
+        for column, column_type in reward_specs.items():
+            try:
+                self.backend.add_column_if_missing("reward_updates", column, column_type)
+            except Exception:
+                pass
+
+        # Best-effort backfill. Each statement is guarded so a partially old DB
+        # will not stop the app from opening.
+        backfills = [
+            """
+            UPDATE paper_decisions
+            SET paper_status = COALESCE(NULLIF(paper_status, ''), NULLIF(status, ''), 'PAPER_MONITOR_ONLY')
+            WHERE paper_status IS NULL OR paper_status = ''
+            """,
+            """
+            UPDATE paper_decisions
+            SET entry_time_utc = COALESCE(NULLIF(entry_time_utc, ''), created_at_utc, datetime('now'))
+            WHERE entry_time_utc IS NULL OR entry_time_utc = ''
+            """,
+            """
+            UPDATE reward_updates
+            SET update_id = COALESCE(NULLIF(update_id, ''), NULLIF(id, ''), lower(hex(randomblob(16))))
+            WHERE update_id IS NULL OR update_id = ''
+            """,
+            """
+            UPDATE reward_updates
+            SET target_date_utc = COALESCE(NULLIF(target_date_utc, ''), NULLIF(due_at_utc, ''), updated_at_utc, datetime('now'))
+            WHERE target_date_utc IS NULL OR target_date_utc = ''
+            """,
+            """
+            UPDATE reward_updates
+            SET horizon_days = COALESCE(horizon_days, reward_horizon_days, 1)
+            WHERE horizon_days IS NULL
+            """,
+            """
+            UPDATE reward_updates
+            SET horizon_display = COALESCE(NULLIF(horizon_display, ''), NULLIF(horizon_label, ''))
+            WHERE horizon_display IS NULL OR horizon_display = ''
+            """,
+            """
+            UPDATE reward_updates
+            SET created_at_utc = COALESCE(NULLIF(created_at_utc, ''), updated_at_utc, target_date_utc, datetime('now'))
+            WHERE created_at_utc IS NULL OR created_at_utc = ''
+            """,
+        ]
+        for sql in backfills:
+            try:
+                self.backend.execute(sql)
+            except Exception:
+                pass
+
+        for sql in [
+            "CREATE INDEX IF NOT EXISTS idx_reward_updates_status_target ON reward_updates(status, target_date_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_paper_decisions_paper_status ON paper_decisions(paper_status)",
+        ]:
+            try:
+                self.backend.execute(sql)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
@@ -335,6 +431,8 @@ class StorageAgent:
                 self.backend.execute(sql)
             except Exception:
                 pass
+
+        self._ensure_reward_compatible_schema()
 
         self.backend.upsert(
             "storage_meta",
@@ -619,21 +717,36 @@ class StorageAgent:
             updates = [updates]
         count = 0
         for update in updates:
+            update_id = str(update.get("update_id") or update.get("id") or update.get("reward_update_id") or self._new_id("reward"))
+            horizon_days = self._safe_int(update.get("horizon_days") or update.get("reward_horizon_days"))
+            target_date = update.get("target_date_utc") or update.get("due_at_utc")
             row = {
-                "id": str(update.get("id") or update.get("reward_update_id") or self._new_id("reward")),
+                # Old StorageAgent schema
+                "id": update_id,
+                "reward_horizon_days": horizon_days,
+                "due_at_utc": target_date,
+                # New RewardAgent schema
+                "update_id": update_id,
+                "horizon_days": horizon_days,
+                "horizon_display": update.get("horizon_display") or update.get("horizon_label"),
+                "target_date_utc": target_date,
+                "latest_date": update.get("latest_date"),
+                "dqn_update_json": self._to_json(update.get("dqn_update") or update.get("dqn_update_json")),
+                "dqn_update_summary": update.get("dqn_update_summary"),
+                "notes": update.get("notes"),
+                "created_at_utc": update.get("created_at_utc") or update.get("updated_at_utc") or self._now_utc(),
+                # Shared fields
                 "decision_id": update.get("decision_id"),
                 "symbol": self._normalise_symbol(update.get("symbol")),
                 "entry_price": self._safe_float(update.get("entry_price")),
                 "latest_close": self._safe_float(update.get("latest_close")),
                 "future_return": self._safe_float(update.get("future_return")),
                 "reward": self._safe_float(update.get("reward")),
-                "reward_horizon_days": self._safe_int(update.get("reward_horizon_days") or update.get("horizon_days")),
                 "horizon_label": update.get("horizon_label"),
                 "final_signal": update.get("final_signal"),
                 "strategy_action": update.get("strategy_action"),
                 "risk_action": update.get("risk_action"),
-                "status": update.get("status") or "COMPLETED",
-                "due_at_utc": update.get("due_at_utc"),
+                "status": update.get("status") or "completed",
                 "updated_at_utc": update.get("updated_at_utc") or self._now_utc(),
                 "raw_json": self._to_json(update),
             }

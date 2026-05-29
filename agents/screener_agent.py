@@ -293,31 +293,74 @@ class ScreenerAgent:
     # --------------------------------------------------
     # Per-symbol scoring
     # --------------------------------------------------
+    def _first_series(self, df: pd.DataFrame, column: str) -> pd.Series:
+        """Return one column as a Series even when duplicate labels exist.
+
+        Historical data from yfinance/database caches can contain both close and
+        adj_close, or MultiIndex columns. After aliasing, duplicate column names
+        make df[column] return a DataFrame. pd.to_numeric then crashes with:
+        "arg must be a list, tuple, 1-d array, or Series".
+        """
+        if df is None or df.empty or column not in df.columns:
+            return pd.Series(dtype="float64")
+        data = df.loc[:, column]
+        if isinstance(data, pd.DataFrame):
+            if data.shape[1] == 0:
+                return pd.Series(dtype="float64")
+            data = data.iloc[:, 0]
+        return data if isinstance(data, pd.Series) else pd.Series(data)
+
     def _normalise_history_result(self, hist: Dict[str, Any]) -> pd.DataFrame:
         prices = hist.get("prices") or hist.get("price_records") or hist.get("records")
-        if not prices:
+
+        if prices is None:
             return pd.DataFrame()
 
-        df = pd.DataFrame(prices)
+        if isinstance(prices, pd.DataFrame):
+            df = prices.copy()
+        else:
+            try:
+                if len(prices) == 0:
+                    return pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+            df = pd.DataFrame(prices)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+
         df.columns = [str(c).lower().strip().replace(" ", "_") for c in df.columns]
 
         # Some historical agents use adj_close, close_price, or datetime aliases.
+        # Do NOT rename adj_close to close when close already exists; that creates
+        # duplicate close columns and crashes pd.to_numeric.
         rename_map = {
             "close_price": "close",
-            "adj_close": "close",
+            "adjclose": "adj_close",
             "date_time": "date",
             "datetime": "date",
+            "timestamp": "date",
+            "price_timestamp": "date",
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        if df.columns.duplicated().any():
+            df = df.loc[:, ~df.columns.duplicated()].copy()
+
+        if "close" not in df.columns and "adj_close" in df.columns:
+            df["close"] = self._first_series(df, "adj_close")
 
         required = ["close", "volume"]
         for col in required:
             if col not in df.columns:
                 df[col] = None
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(self._first_series(df, col), errors="coerce")
 
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(self._first_series(df, "date"), errors="coerce")
             df = df.sort_values("date")
 
         df = df.dropna(subset=["close", "volume"])
