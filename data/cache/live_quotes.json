@@ -1,36 +1,36 @@
 {
   "finnhub:AAPL": {
-    "cached_at": 1780076525.9206991,
+    "cached_at": 1780077714.4882815,
     "ttl_seconds": 30,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "AAPL",
-      "current_price": 309.98,
+      "current_price": 309.73,
       "open_price": 311.49249999999995,
       "high_price": 315.0,
-      "low_price": 309.91,
+      "low_price": 309.53,
       "previous_close": 312.51,
-      "timestamp": 1780076495,
-      "timestamp_iso": "2026-05-29T17:41:35+00:00",
-      "data_age_seconds": 30.92,
+      "timestamp": 1780077698,
+      "timestamp_iso": "2026-05-29T18:01:38+00:00",
+      "data_age_seconds": 16.49,
       "attempts": 1,
       "raw_response": {
-        "c": 309.98,
-        "d": -2.53,
-        "dp": -0.8096,
+        "c": 309.73,
+        "d": -2.78,
+        "dp": -0.8896,
         "h": 315,
-        "l": 309.91,
+        "l": 309.53,
         "o": 311.49249999999995,
         "pc": 312.51,
-        "t": 1780076495
+        "t": 1780077698
       },
       "from_cache": false,
       "cache_ttl_seconds": 30
     }
   },
   "alpha_vantage:AAPL": {
-    "cached_at": 1780076526.8758223,
+    "cached_at": 1780077714.9900262,
     "ttl_seconds": 300,
     "payload": {
       "source": "Alpha Vantage",
@@ -62,32 +62,38 @@
     }
   },
   "finnhub:MSFT": {
-    "cached_at": 1780016248.6582508,
+    "cached_at": 1780078584.7822654,
+    "ttl_seconds": 30,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "MSFT",
-      "current_price": 426.99,
-      "open_price": 412.975,
-      "high_price": 429.49,
-      "low_price": 412.67,
-      "previous_close": 412.67,
-      "timestamp": 1779998400,
+      "current_price": 442.33,
+      "open_price": 430.63750000000005,
+      "high_price": 445.64,
+      "low_price": 430.63750000000005,
+      "previous_close": 426.99,
+      "timestamp": 1780078551,
+      "timestamp_iso": "2026-05-29T18:15:51+00:00",
+      "data_age_seconds": 33.78,
+      "attempts": 1,
       "raw_response": {
-        "c": 426.99,
-        "d": 14.32,
-        "dp": 3.4701,
-        "h": 429.49,
-        "l": 412.67,
-        "o": 412.975,
-        "pc": 412.67,
-        "t": 1779998400
+        "c": 442.33,
+        "d": 15.34,
+        "dp": 3.5926,
+        "h": 445.64,
+        "l": 430.63750000000005,
+        "o": 430.63750000000005,
+        "pc": 426.99,
+        "t": 1780078551
       },
-      "from_cache": false
+      "from_cache": false,
+      "cache_ttl_seconds": 30
     }
   },
   "alpha_vantage:MSFT": {
-    "cached_at": 1780016249.0581412,
+    "cached_at": 1780078585.7218928,
+    "ttl_seconds": 300,
     "payload": {
       "source": "Alpha Vantage",
       "success": true,
@@ -98,6 +104,7 @@
       "low_price": 412.67,
       "previous_close": 412.67,
       "latest_trading_day": "2026-05-28",
+      "attempts": 1,
       "raw_response": {
         "Global Quote": {
           "01. symbol": "MSFT",
@@ -105,14 +112,15 @@
           "03. high": "429.4900",
           "04. low": "412.6700",
           "05. price": "426.9900",
-          "06. volume": "45432702",
+          "06. volume": "47250541",
           "07. latest trading day": "2026-05-28",
           "08. previous close": "412.6700",
           "09. change": "14.3200",
           "10. change percent": "3.4701%"
         }
       },
-      "from_cache": false
+      "from_cache": false,
+      "cache_ttl_seconds": 300
     }
   },
   "finnhub:AMD": {
