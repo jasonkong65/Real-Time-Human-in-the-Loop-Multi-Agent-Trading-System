@@ -36,7 +36,7 @@ The human user stays in control. The app gives research guidance, not trade exec
 ### 1. Clone or unzip the project
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/jasonkong65/Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System.git
 cd Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System
 ```
 
