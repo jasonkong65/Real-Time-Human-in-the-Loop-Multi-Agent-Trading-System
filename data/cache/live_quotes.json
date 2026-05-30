@@ -62,65 +62,65 @@
     }
   },
   "finnhub:MSFT": {
-    "cached_at": 1780078584.7822654,
-    "ttl_seconds": 30,
+    "cached_at": 1780114478.6530793,
+    "ttl_seconds": 900,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "MSFT",
-      "current_price": 442.33,
-      "open_price": 430.63750000000005,
-      "high_price": 445.64,
-      "low_price": 430.63750000000005,
+      "current_price": 450.24,
+      "open_price": 432.545,
+      "high_price": 450.33,
+      "low_price": 432.36,
       "previous_close": 426.99,
-      "timestamp": 1780078551,
-      "timestamp_iso": "2026-05-29T18:15:51+00:00",
-      "data_age_seconds": 33.78,
+      "timestamp": 1780084800,
+      "timestamp_iso": "2026-05-29T20:00:00+00:00",
+      "data_age_seconds": 29678.65,
       "attempts": 1,
       "raw_response": {
-        "c": 442.33,
-        "d": 15.34,
-        "dp": 3.5926,
-        "h": 445.64,
-        "l": 430.63750000000005,
-        "o": 430.63750000000005,
+        "c": 450.24,
+        "d": 23.25,
+        "dp": 5.4451,
+        "h": 450.33,
+        "l": 432.36,
+        "o": 432.545,
         "pc": 426.99,
-        "t": 1780078551
+        "t": 1780084800
       },
       "from_cache": false,
-      "cache_ttl_seconds": 30
+      "cache_ttl_seconds": 900
     }
   },
   "alpha_vantage:MSFT": {
-    "cached_at": 1780078585.7218928,
-    "ttl_seconds": 300,
+    "cached_at": 1780114479.733391,
+    "ttl_seconds": 1800,
     "payload": {
       "source": "Alpha Vantage",
       "success": true,
       "symbol": "MSFT",
-      "current_price": 426.99,
-      "open_price": 412.975,
-      "high_price": 429.49,
-      "low_price": 412.67,
-      "previous_close": 412.67,
-      "latest_trading_day": "2026-05-28",
+      "current_price": 450.24,
+      "open_price": 432.545,
+      "high_price": 450.33,
+      "low_price": 432.36,
+      "previous_close": 426.99,
+      "latest_trading_day": "2026-05-29",
       "attempts": 1,
       "raw_response": {
         "Global Quote": {
           "01. symbol": "MSFT",
-          "02. open": "412.9750",
-          "03. high": "429.4900",
-          "04. low": "412.6700",
-          "05. price": "426.9900",
-          "06. volume": "47250541",
-          "07. latest trading day": "2026-05-28",
-          "08. previous close": "412.6700",
-          "09. change": "14.3200",
-          "10. change percent": "3.4701%"
+          "02. open": "432.5450",
+          "03. high": "450.3300",
+          "04. low": "432.3600",
+          "05. price": "450.2400",
+          "06. volume": "79654376",
+          "07. latest trading day": "2026-05-29",
+          "08. previous close": "426.9900",
+          "09. change": "23.2500",
+          "10. change percent": "5.4451%"
         }
       },
       "from_cache": false,
-      "cache_ttl_seconds": 300
+      "cache_ttl_seconds": 1800
     }
   },
   "finnhub:AMD": {

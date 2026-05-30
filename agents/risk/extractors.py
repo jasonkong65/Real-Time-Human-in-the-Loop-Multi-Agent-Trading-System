@@ -1,34 +1,14 @@
 from __future__ import annotations
 
-import json
-
 import math
-
-import random
-
-import sqlite3
-
-from datetime import datetime, timezone
-
-from pathlib import Path
-
-from typing import Any, Dict, List, Optional, Tuple
-
-import joblib
-
-import pandas as pd
-
-import torch
-
-import torch.nn as nn
-
-import torch.optim as optim
-
-from .dqn import DQNNetwork
+from typing import Any, Dict, List, Optional
 
 
 class RiskExtractionMixin:
 
+
+    def _safe_dict(self, value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
 
     def _safe_float(self, value: Any, default: Optional[float] = None) -> Optional[float]:
         try:
@@ -43,10 +23,11 @@ class RiskExtractionMixin:
         except Exception:
             return default
 
-
     def _clip(self, value: float, low: float = 0.0, high: float = 1.0) -> float:
-        return max(low, min(high, float(value)))
-
+        try:
+            return max(low, min(high, float(value)))
+        except Exception:
+            return low
 
     def _get_nested(self, data: Dict[str, Any], keys: List[str], default=None):
         current = data
@@ -58,13 +39,11 @@ class RiskExtractionMixin:
                 return default
         return current
 
-
     def _normalise_label(self, value: Any, default: str = "UNKNOWN") -> str:
         if value is None:
             return default
         value = str(value).strip().upper()
         return value if value else default
-
 
     def _get_symbol(
         self,
@@ -72,11 +51,14 @@ class RiskExtractionMixin:
         analysis_result: Dict[str, Any],
         validation_result: Dict[str, Any],
     ) -> str:
+        signal_result = self._safe_dict(signal_result)
+        analysis_result = self._safe_dict(analysis_result)
+        validation_result = self._safe_dict(validation_result)
         candidates = [
-            signal_result.get("symbol") if isinstance(signal_result, dict) else None,
+            signal_result.get("symbol"),
             self._get_nested(signal_result, ["signal_for_next_agent", "symbol"]),
-            analysis_result.get("symbol") if isinstance(analysis_result, dict) else None,
-            validation_result.get("symbol") if isinstance(validation_result, dict) else None,
+            analysis_result.get("symbol"),
+            validation_result.get("symbol"),
             self._get_nested(validation_result, ["validation_for_next_agent", "symbol"]),
         ]
         for item in candidates:
@@ -84,24 +66,24 @@ class RiskExtractionMixin:
                 return str(item).upper().strip()
         return "UNKNOWN"
 
-
     def _validation_score(self, validation_result: Dict[str, Any]) -> float:
+        validation_result = self._safe_dict(validation_result)
         score = self._safe_float(validation_result.get("confidence_score"))
         if score is not None:
             return self._clip(score)
         confidence = str(validation_result.get("confidence", "Medium")).lower()
         return {"high": 1.0, "medium": 0.72, "low": 0.40}.get(confidence, 0.60)
 
-
     def _validation_confidence(self, validation_result: Dict[str, Any]) -> str:
+        validation_result = self._safe_dict(validation_result)
         return str(validation_result.get("confidence", "Medium")).title()
 
-
     def _validation_action(self, validation_result: Dict[str, Any]) -> str:
+        validation_result = self._safe_dict(validation_result)
         return str(validation_result.get("next_action", "ALLOW_ANALYSIS")).upper()
 
-
     def _model_signal(self, signal_result: Dict[str, Any]) -> str:
+        signal_result = self._safe_dict(signal_result)
         value = (
             signal_result.get("model_signal")
             or signal_result.get("final_signal")
@@ -111,15 +93,15 @@ class RiskExtractionMixin:
         )
         return self._normalise_label(value, "HOLD")
 
-
     def _model_confidence(self, signal_result: Dict[str, Any]) -> float:
+        signal_result = self._safe_dict(signal_result)
         value = self._safe_float(signal_result.get("prediction_confidence"))
         if value is None:
             value = self._safe_float(self._get_nested(signal_result, ["signal_for_next_agent", "prediction_confidence"]))
         return self._clip(value if value is not None else 0.50)
 
-
     def _model_confidence_level(self, signal_result: Dict[str, Any]) -> str:
+        signal_result = self._safe_dict(signal_result)
         level = signal_result.get("confidence_level") or self._get_nested(signal_result, ["signal_for_next_agent", "confidence_level"])
         if level:
             return str(level).title()
@@ -130,17 +112,26 @@ class RiskExtractionMixin:
             return "Medium"
         return "Low"
 
-
     def _analyst_signal(self, analysis_result: Dict[str, Any]) -> str:
+        analysis_result = self._safe_dict(analysis_result)
         return self._normalise_label(analysis_result.get("analyst_signal"), "NEUTRAL")
 
-
     def _analyst_score(self, analysis_result: Dict[str, Any]) -> float:
+        analysis_result = self._safe_dict(analysis_result)
         return self._clip(self._safe_float(analysis_result.get("analyst_score"), 0.50) or 0.50)
 
+    def _stage2(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        analysis_result = self._safe_dict(analysis_result)
+        return self._safe_dict(analysis_result.get("stage_2_historical_analysis"))
+
+    def _features(self, analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        analysis_result = self._safe_dict(analysis_result)
+        return self._safe_dict(analysis_result.get("features_for_model"))
 
     def _entry_risk(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
-        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        analysis_result = self._safe_dict(analysis_result)
+        signal_result = self._safe_dict(signal_result)
+        stage2 = self._stage2(analysis_result)
         value = (
             analysis_result.get("entry_risk_level")
             or stage2.get("entry_risk_level")
@@ -149,9 +140,10 @@ class RiskExtractionMixin:
         )
         return str(value).title()
 
-
     def _trend_direction(self, analysis_result: Dict[str, Any], signal_result: Dict[str, Any]) -> str:
-        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        analysis_result = self._safe_dict(analysis_result)
+        signal_result = self._safe_dict(signal_result)
+        stage2 = self._stage2(analysis_result)
         value = (
             analysis_result.get("trend_direction")
             or stage2.get("trend_direction")
@@ -160,15 +152,14 @@ class RiskExtractionMixin:
         )
         return str(value).title()
 
-
     def _volatility_level(self, analysis_result: Dict[str, Any]) -> str:
-        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        analysis_result = self._safe_dict(analysis_result)
+        stage2 = self._stage2(analysis_result)
         value = analysis_result.get("volatility_level") or stage2.get("volatility_level") or "Unknown"
         return str(value).title()
 
-
     def _feature_value(self, analysis_result: Dict[str, Any], key: str, default: float = 0.0) -> float:
-        features = analysis_result.get("features_for_model", {}) if isinstance(analysis_result, dict) else {}
-        stage2 = analysis_result.get("stage_2_historical_analysis", {}) if isinstance(analysis_result, dict) else {}
+        analysis_result = self._safe_dict(analysis_result)
+        features = self._features(analysis_result)
+        stage2 = self._stage2(analysis_result)
         return self._safe_float(features.get(key, stage2.get(key, default)), default) or default
-
