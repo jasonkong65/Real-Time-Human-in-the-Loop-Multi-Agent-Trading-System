@@ -62,7 +62,7 @@
     }
   },
   "finnhub:MSFT": {
-    "cached_at": 1780114478.6530793,
+    "cached_at": 1780117872.2080412,
     "ttl_seconds": 900,
     "payload": {
       "source": "Finnhub",
@@ -75,7 +75,7 @@
       "previous_close": 426.99,
       "timestamp": 1780084800,
       "timestamp_iso": "2026-05-29T20:00:00+00:00",
-      "data_age_seconds": 29678.65,
+      "data_age_seconds": 33072.21,
       "attempts": 1,
       "raw_response": {
         "c": 450.24,
@@ -92,7 +92,7 @@
     }
   },
   "alpha_vantage:MSFT": {
-    "cached_at": 1780114479.733391,
+    "cached_at": 1780117872.7239134,
     "ttl_seconds": 1800,
     "payload": {
       "source": "Alpha Vantage",

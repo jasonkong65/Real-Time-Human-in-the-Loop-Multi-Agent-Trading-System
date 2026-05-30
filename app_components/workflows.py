@@ -343,6 +343,46 @@ def run_selected_workflow(controls: Dict[str, Any], agents: Dict[str, Any]) -> N
                     "execution_result": execution_result,
                 })
 
+
+            if "Training diagnostics" in query_modes:
+                diagnostics_historical_data = result_bundle.get("historical_data")
+                if not diagnostics_historical_data:
+                    diagnostics_historical_data = call_agent_method(
+                        agents["historical"],
+                        ["get_or_download_data", "run"],
+                        symbol,
+                        "1y",
+                        "1d",
+                        symbol=symbol,
+                        period="1y",
+                        interval="1d",
+                        force_refresh=False,
+                    )
+
+                validation_score = 0.95
+                validation_result = result_bundle.get("validation_result") or {}
+                try:
+                    validation_score = float(validation_result.get("confidence_score", 0.95))
+                except Exception:
+                    validation_score = 0.95
+
+                try:
+                    training_diagnostics_result = agents["training"].optimize_from_historical_data(
+                        symbol=symbol,
+                        historical_data=diagnostics_historical_data,
+                        validation_confidence_score=validation_score,
+                        apply_to_main_model=controls.get("apply_training_diagnostics_to_main_model", False),
+                    )
+                except Exception as exc:
+                    training_diagnostics_result = {
+                        "success": False,
+                        "agent": "Training Agent",
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                        "summary": "Training Agent diagnostics failed, but the main research workflow can still be reviewed.",
+                    }
+                result_bundle["training_diagnostics_result"] = training_diagnostics_result
+
             if "Financial news / report summary" in query_modes:
                 result_bundle["news_report_result"] = run_financial_news_summary(
                     symbol=symbol,

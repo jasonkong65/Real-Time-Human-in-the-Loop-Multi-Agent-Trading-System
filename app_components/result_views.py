@@ -15,7 +15,7 @@ from app_components.helpers import (
     selected_price_from_quote,
 )
 from app_components.strategy_view import render_strategy_guidance_plain
-from app_components.ui_helpers import card, render_status_pills
+from app_components.ui_helpers import card, card_variant_from_text, render_status_pills
 
 
 def render_error_if_needed() -> None:
@@ -62,18 +62,22 @@ def render_results(bundle: Dict[str, Any], agents: Dict[str, Any]) -> None:
 
     summary_cols = st.columns(6)
     with summary_cols[0]:
-        card("Symbol", symbol)
+        card("Symbol", symbol, variant="blue")
     with summary_cols[1]:
-        card("Price", format_price(entry_price))
+        card("Price", format_price(entry_price), variant="teal")
     with summary_cols[2]:
         analyst_label = clean_label(analysis_result.get("display_signal") or analysis_result.get("analyst_signal"))
-        card("Analyst", analyst_label)
+        card("Analyst", analyst_label, variant=card_variant_from_text(analyst_label, "green"))
     with summary_cols[3]:
-        card("Model", clean_label(signal_result.get("display_signal") or signal_result.get("model_signal") or signal_result.get("signal")))
+        model_label = clean_label(signal_result.get("display_signal") or signal_result.get("model_signal") or signal_result.get("signal"))
+        card("Model", model_label, variant=card_variant_from_text(model_label, "indigo"))
     with summary_cols[4]:
-        card("Risk", clean_label(risk_result.get("risk_level")))
+        risk_label = clean_label(risk_result.get("risk_level"))
+        risk_variant = "green" if risk_label.lower() == "low" else "amber" if risk_label.lower() == "medium" else "red"
+        card("Risk", risk_label, variant=risk_variant)
     with summary_cols[5]:
-        card("Strategy", clean_label(strategy_result.get("strategy_action")))
+        strategy_label = clean_label(strategy_result.get("strategy_action"))
+        card("Strategy", strategy_label, variant=card_variant_from_text(strategy_label, "purple"))
 
     status_items = [
         f"Chart: {live_chart_label} / {live_chart_period} / {live_chart_interval}",
@@ -151,6 +155,7 @@ def render_results(bundle: Dict[str, Any], agents: Dict[str, Any]) -> None:
             "Historical Data Agent": bundle.get("historical_data"),
             "Analyst Agent": bundle.get("analysis_result"),
             "Training Agent": bundle.get("training_result"),
+            "Training Agent Diagnostics": bundle.get("training_diagnostics_result"),
             "Signal Model": bundle.get("signal_result"),
             "Risk Agent": bundle.get("risk_result"),
             "Strategist Agent": bundle.get("strategy_result"),
@@ -246,14 +251,14 @@ def render_results(bundle: Dict[str, Any], agents: Dict[str, Any]) -> None:
             metrics = evaluation_result.get("metrics") or evaluation_result
             cols = st.columns(4)
             with cols[0]:
-                card("Reward Win Rate", format_pct(metrics.get("reward_win_rate")))
+                card("Reward Win Rate", format_pct(metrics.get("reward_win_rate")), variant="green")
             with cols[1]:
-                card("Directional Win Rate", format_pct(metrics.get("directional_win_rate")))
+                card("Directional Win Rate", format_pct(metrics.get("directional_win_rate")), variant="teal")
             with cols[2]:
-                card("Avg Reward", metrics.get("average_reward", "N/A"))
+                card("Avg Reward", metrics.get("average_reward", "N/A"), variant="blue")
             with cols[3]:
                 dqn_ready = get_nested(evaluation_result, ["dqn_summary", "ready_for_training"], None)
-                card("DQN Ready", str(dqn_ready))
+                card("DQN Ready", str(dqn_ready), variant="green" if dqn_ready else "amber")
 
             completed_count = metrics.get("completed_reward_count") or evaluation_result.get("completed_reward_count")
             pending_count = metrics.get("pending_count") or evaluation_result.get("pending_count")

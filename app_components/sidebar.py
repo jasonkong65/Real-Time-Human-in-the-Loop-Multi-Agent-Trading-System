@@ -82,6 +82,14 @@ def render_sidebar() -> Dict[str, Any]:
                 help="Stores the paper decision for later reward/evaluator analysis.",
             )
 
+        # Training diagnostics are now automatic.
+        # They run only when the single-stock pipeline is selected, so the user
+        # no longer needs to understand or tick extra model-maintenance boxes.
+        # If diagnostics finds a clearly stronger model, TrainingAgent's own
+        # quality gate decides whether the saved signal model should be updated.
+        run_training_diagnostics = "Single-stock agent pipeline" in core_query_modes
+        apply_training_diagnostics_to_main_model = run_training_diagnostics
+
         st.divider()
         st.subheader("News / Report Agent")
         run_news_report = st.checkbox(
@@ -130,6 +138,8 @@ def render_sidebar() -> Dict[str, Any]:
             query_modes.append("Financial news / report summary")
         if run_screener:
             query_modes.append("Watchlist screener")
+        if run_training_diagnostics:
+            query_modes.append("Training diagnostics")
         st.session_state["query_modes"] = query_modes
         st.caption("Selected modules: " + (", ".join(query_modes) if query_modes else "None"))
 
@@ -150,6 +160,8 @@ def render_sidebar() -> Dict[str, Any]:
         "event_risk": event_risk,
         "force_retrain": force_retrain,
         "record_paper_decision": record_paper_decision,
+        "run_training_diagnostics": run_training_diagnostics,
+        "apply_training_diagnostics_to_main_model": apply_training_diagnostics_to_main_model,
         "source_mode": source_mode,
         "lookback_days": lookback_days,
         "max_news": max_news,

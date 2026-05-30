@@ -33,9 +33,10 @@ from .selection import TrainingSelectionMixin
 from .drift import TrainingDriftMixin
 from .workflow import TrainingWorkflowMixin
 from .signal import TrainingSignalMixin
+from .diagnostics import TrainingDiagnosticsMixin
 
 
-class TrainingAgent(TrainingHelpersMixin, TrainingFeatureMixin, TrainingSelectionMixin, TrainingDriftMixin, TrainingWorkflowMixin, TrainingSignalMixin):
+class TrainingAgent(TrainingHelpersMixin, TrainingFeatureMixin, TrainingSelectionMixin, TrainingDriftMixin, TrainingWorkflowMixin, TrainingSignalMixin, TrainingDiagnosticsMixin):
     """Training Agent
 
 Builds and maintains a lightweight stock-signal model automatically.

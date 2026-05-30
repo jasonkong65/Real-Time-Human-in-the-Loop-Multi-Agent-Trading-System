@@ -3,7 +3,7 @@ from typing import Any, Dict
 import streamlit as st
 
 from app_components.helpers import clean_label
-from app_components.ui_helpers import card
+from app_components.ui_helpers import card, card_variant_from_text
 
 def _plain_reason(text: Any) -> str:
     """Convert internal snake-case / raw reason text into readable UI text."""
@@ -84,11 +84,11 @@ def render_strategy_guidance_plain(strategy_result: Dict[str, Any], risk_result:
 
     cols = st.columns(3)
     with cols[0]:
-        card("Suggested action", action)
+        card("Suggested action", action, variant=card_variant_from_text(action, "purple"))
     with cols[1]:
-        card("Strategy level", level)
+        card("Strategy level", level, variant=card_variant_from_text(level, "amber"))
     with cols[2]:
-        card("Confidence", confidence_text)
+        card("Confidence", confidence_text, variant=card_variant_from_text(confidence_text, "blue"))
 
     st.markdown("##### Plain-language recommendation")
     st.info(plain_answer)
