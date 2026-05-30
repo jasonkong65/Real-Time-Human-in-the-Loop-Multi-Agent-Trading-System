@@ -10,7 +10,7 @@ def test_storage_agent_records_and_reads_historical_prices(tmp_path):
     from agents.storage_agent import StorageAgent
 
     db_path = tmp_path / "trading_system.db"
-    storage = StorageAgent(db_path=str(db_path))
+    storage = StorageAgent(db_path=str(db_path), database_url=f"sqlite:///{db_path}")
     prices = [
         {"date": "2024-01-01", "open": 10, "high": 11, "low": 9, "close": 10.5, "adj_close": 10.5, "volume": 1000},
         {"date": "2024-01-02", "open": 11, "high": 12, "low": 10, "close": 11.5, "adj_close": 11.5, "volume": 1100},

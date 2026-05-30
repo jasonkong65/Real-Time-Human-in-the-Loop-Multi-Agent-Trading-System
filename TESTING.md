@@ -1,33 +1,40 @@
-# Project tests
+# Testing
 
-This project uses `pytest` for lightweight automated checks. The tests are designed for a coursework/demo environment, so they do not call real broker APIs, do not place trades, and do not require live market data.
+This project includes a lightweight pytest suite for the Streamlit multi-agent stock research system.
 
-## What the tests cover
+The tests are designed to run without real market/API calls. The pytest setup stubs optional external packages when needed and removes local API/database environment variables during tests, so results should be the same on a local machine and in GitHub Actions.
 
-- Import compatibility for the refactored agent packages.
-- Basic agent construction with temporary SQLite/model paths.
-- App helper functions, ticker cleaning, label formatting, price formatting, and nested dictionary access.
-- OHLCV dataframe cleaning, including duplicate `close` columns and yfinance-style MultiIndex columns.
-- Portfolio and event context builders.
-- Validation Agent behaviour on consistent multi-source quotes.
-- Risk Agent DQN warm-up behaviour and safe handling of missing nested analysis sections.
-- Strategist Agent human-review output.
-- SQLite storage for historical prices and UI session logs.
-- Training Agent feature dataset creation.
-- LLM Report Agent local fallback when Groq is not configured.
-- Screener Agent scoring with mocked historical data.
-- Screener report fallback when no LLM agent is available.
-
-## Run locally
+## Run tests locally
 
 ```bash
 pip install -r requirements.txt
-pip install pytest
-pytest
+pytest -q
 ```
 
-The tests include small stubs for optional packages such as Streamlit, yfinance, and Groq when those packages are not installed in the current environment. In a normal project environment, the real packages from `requirements.txt` will be used.
+For a basic syntax check, run:
+
+```bash
+python -m compileall -q .
+```
+
+## What the tests cover
+
+The current test suite checks:
+
+- compatibility imports from the old agent entry files and the new package-style agent folders
+- basic agent initialization using temporary paths
+- Streamlit helper functions and chart dataframe cleaning
+- portfolio and event context builders
+- Validation Agent data quality logic
+- Risk Agent initialization and DQN warm-up path
+- Strategist Agent output structure
+- SQLite historical price storage and reading
+- Execution Agent UI-session recording
+- Training Agent dataset construction and signal generation helpers
+- LLM Report Agent fallback behavior when Groq is not available
+- Screener Agent basic scoring path
+- workflow helper behavior
 
 ## Notes
 
-The tests are smoke and component tests. They check that the project structure, agents, SQLite storage, DQN risk layer, and UI helper logic are wired correctly. They are not intended to verify financial performance or real trading decisions.
+The tests do not try to prove the financial model is profitable. They are smoke and integration checks for project reliability, import safety, SQLite isolation, and basic agent behavior.

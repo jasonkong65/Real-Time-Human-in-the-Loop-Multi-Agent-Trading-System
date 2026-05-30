@@ -9,7 +9,7 @@ from app_components.result_views import render_error_if_needed, render_results, 
 from app_components.sidebar import render_sidebar
 from app_components.workflows import run_selected_workflow
 
-"""Main application file for the multi-agent stock research system. This file sets up the Streamlit page, loads all agents, renders the sidebar for user input, and orchestrates the execution of the selected workflows based on user interactions. It also handles error rendering and displays results from the agent pipeline in a user-friendly format. The app is designed to be modular, with separate components for agent management, charting, contexts, helpers, result views, and workflows to ensure maintainability and extensibility.""""
+"""Main application file for the multi-agent stock research system. This file sets up the Streamlit page, loads all agents, renders the sidebar for user input, and orchestrates the execution of the selected workflows based on user interactions. It also handles error rendering and displays results from the agent pipeline in a user-friendly format. The app is designed to be modular, with separate components for agent management, charting, contexts, helpers, result views, and workflows to ensure maintainability and extensibility."""
 
 load_dotenv()
 configure_page()

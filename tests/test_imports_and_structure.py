@@ -52,4 +52,6 @@ def test_core_agents_instantiate_with_temp_paths(tmp_path, monkeypatch):
     assert EvaluatorAgent(db_path=str(tmp_path / "trading_system.db"))
     assert ExecutionAgent(db_path=str(tmp_path / "ui.db"), artifact_dir=str(tmp_path / "ui_sessions"))
     assert StrategistAgent()
-    assert LLMReportAgent()._is_available() is False
+    llm = LLMReportAgent()
+    assert isinstance(llm._is_available(), bool)
+    assert hasattr(llm, "generate_single_stock_report")

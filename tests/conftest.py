@@ -225,3 +225,23 @@ def sample_multi_quote():
             "latest_trading_day": "2024-01-02",
         },
     }
+
+
+@pytest.fixture(autouse=True)
+def isolate_external_environment(monkeypatch):
+    """Keep tests independent from the developer's local .env file.
+
+    Some local machines have GROQ_API_KEY or DATABASE_URL set. That can make
+    tests behave differently from GitHub Actions: the LLM client may become
+    available unexpectedly, and StorageAgent may write to the real project
+    database instead of a temporary SQLite file.
+    """
+    for key in [
+        "GROQ_API_KEY",
+        "FINNHUB_API_KEY",
+        "ALPHA_VANTAGE_API_KEY",
+        "ALPHAVANTAGE_API_KEY",
+        "DATABASE_URL",
+        "DB_FORCE_SQLALCHEMY",
+    ]:
+        monkeypatch.delenv(key, raising=False)
