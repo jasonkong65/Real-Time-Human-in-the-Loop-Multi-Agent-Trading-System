@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystFeatureMixin:
-
+    """Mixin for building technical trading features from historical price data, with a fallback implementation if an external feature builder is unavailable."""
 
     def _fallback_feature_builder(self, price_records: List[Dict[str, Any]]) -> pd.DataFrame:
         if not price_records:

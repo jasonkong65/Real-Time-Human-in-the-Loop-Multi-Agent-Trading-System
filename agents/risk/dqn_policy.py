@@ -28,7 +28,7 @@ from .dqn import DQNNetwork
 
 
 class RiskDqnPolicyMixin:
-
+    """Mixin for implementing a DQN-based policy network to produce risk action advisories based on extracted state features, with methods for training from replay memory and saving/loading the model."""
 
     def _load_or_init_dqn(self) -> None:
         checkpoint_path = self.dqn_model_path

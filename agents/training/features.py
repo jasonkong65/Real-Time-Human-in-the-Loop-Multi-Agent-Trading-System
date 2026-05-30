@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingFeatureMixin:
 
+    """Mixin for building training features in the TrainingAgent, including methods to clean and preprocess historical price data, engineer features such as returns, moving average gaps, volatility, volume changes, and RSI, create training labels based on future returns, and construct datasets suitable for model training while ensuring sufficient data quality and class balance."""
 
     def _rsi(self, close: pd.Series, window: int = 14) -> pd.Series:
         delta = close.diff()

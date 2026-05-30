@@ -11,6 +11,10 @@ from app_components.constants import (
 )
 from app_components.helpers import first_series, normalise_ohlcv_columns
 
+
+"""Component for rendering live price charts with user-selectable periods and styles, including utilities to synchronise chart controls across multiple chart instances and trigger lightweight data refreshes without rerunning the full agent pipeline.
+The render_chart function takes care of normalising incoming data, handling various column naming conventions, and rendering both price and volume charts with optional moving averages. The chart controls are designed to be independent from the main research pipeline, allowing users to adjust the chart view without triggering expensive data processing or model inference steps."""
+
 def chart_preset(label: str) -> Tuple[str, str]:
     presets = {
         "1 Day": ("1d", "5m"),

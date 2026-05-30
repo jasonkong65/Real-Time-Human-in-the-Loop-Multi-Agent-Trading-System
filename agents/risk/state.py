@@ -29,6 +29,8 @@ from .dqn import DQNNetwork
 
 class RiskStateMixin:
 
+    """Mixin for constructing state representations for the RiskAgent based on validation results, analysis results, and signal results, including methods to convert these into both vector and string formats suitable for DQN input and Q-table diagnostics."""
+
 
     def _risk_numeric(self, label: str) -> float:
         label = str(label).lower()

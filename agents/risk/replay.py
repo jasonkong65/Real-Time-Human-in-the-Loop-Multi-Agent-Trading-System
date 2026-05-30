@@ -29,6 +29,7 @@ from .dqn import DQNNetwork
 
 class RiskReplayMixin:
 
+    """Mixin for managing replay memory for the RiskAgent, including methods to record new experiences, sample batches for DQN training, and maintain a lightweight Q-table for diagnostics and fallback action advisories."""
 
     def _load_q_table_compat(self) -> Dict[str, Dict[str, float]]:
         if self.q_table_path.exists() and self.q_table_path.stat().st_size > 0:

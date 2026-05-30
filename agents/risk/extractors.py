@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 
 class RiskExtractionMixin:
-
+    """Safe extraction helpers for RiskAgent."""
 
     def _safe_dict(self, value: Any) -> Dict[str, Any]:
         return value if isinstance(value, dict) else {}

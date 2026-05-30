@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingSelectionMixin:
 
+    """Mixin for model selection logic in the TrainingAgent, including methods to define candidate models with specific hyperparameters, perform walk-forward validation to evaluate models on multiple sequential train/test splits, calculate composite scores from multiple metrics, compute baseline scores for comparison, extract feature importance from trained models, and save metadata about training runs and model performance."""
 
     def _candidate_models(self, pooled_available: bool) -> List[Tuple[str, Any, Dict[str, Any], bool]]:
         candidates: List[Tuple[str, Any, Dict[str, Any], bool]] = [

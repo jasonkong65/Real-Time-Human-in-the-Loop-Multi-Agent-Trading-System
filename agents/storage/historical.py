@@ -27,6 +27,7 @@ except Exception:
 
 class StorageHistoricalMixin:
 
+    """Mixin for managing historical price data and metadata, including methods to record new historical prices and metadata, retrieve historical prices as lists or DataFrames, and maintain metadata about the latest available data for each symbol/period/interval combination."""
 
     def record_historical_prices(
         self,

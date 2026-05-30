@@ -24,16 +24,7 @@ from .combine import AnalystCombineMixin
 
 
 class AnalystAgent(AnalystConfigMixin, AnalystFeatureMixin, AnalystMarketContextMixin, AnalystQuoteMixin, AnalystHistoricalMixin, AnalystCombineMixin):
-    """Two-stage technical Analyst Agent.
-
-Stage 1: Reads live quote movement.
-Stage 2: Reads historical trend, momentum, volatility, RSI and volume.
-Stage 3: Combines both stages with optional market-regime and sector-trend context.
-
-Design goals:
-- Keep trend direction separate from entry timing risk.
-- Avoid treating a strong rising stock as a simple sell signal.
-- Produce short, natural explanations and an indicator contribution table."""
+    """A modular agent for analyzing stocks based on configurable scoring of quote and historical data, with optional market context adjustments."""
 
 
     DEFAULT_CONFIG = {

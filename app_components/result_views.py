@@ -17,6 +17,7 @@ from app_components.helpers import (
 from app_components.strategy_view import render_strategy_guidance_plain
 from app_components.ui_helpers import card, card_variant_from_text, render_status_pills
 
+"""Result rendering functions for displaying the outcomes of the multi-agent stock research pipeline."""
 
 def render_error_if_needed() -> None:
     if "last_error" in st.session_state:

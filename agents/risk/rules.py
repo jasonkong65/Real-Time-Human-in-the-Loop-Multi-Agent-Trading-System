@@ -29,6 +29,7 @@ from .dqn import DQNNetwork
 
 class RiskRulesMixin:
 
+    """Mixin for implementing hard rule-based safety checks to determine non-negotiable safety actions based on validation results, analysis results, and signal results, as well as methods to combine these with DQN advisory actions and produce final risk assessments and interpretations."""
 
     def _hard_safety_action(
         self,

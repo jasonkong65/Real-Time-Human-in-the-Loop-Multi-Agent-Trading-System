@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingSignalMixin:
 
+    """Mixin for building and generating trading signals in the TrainingAgent, including methods to construct feature vectors from analysis results, predict raw signals using the trained model, refine signals based on contextual factors, generate fallback signals when predictions fail, and produce comprehensive signal outputs that include confidence levels and reasoning for use in downstream agents and diagnostics."""
 
     def _feature_from_analysis(self, analysis_result: Dict[str, Any]) -> pd.DataFrame:
         feature_source = analysis_result.get("features_for_model") if isinstance(analysis_result, dict) else {}

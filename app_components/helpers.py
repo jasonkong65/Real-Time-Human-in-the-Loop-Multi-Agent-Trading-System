@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+"""Helper functions for the analyst agent and other components, including utilities for safe JSON serialization, symbol and label cleaning, price and percentage formatting, nested dictionary access, DataFrame column normalisation, and robust method calling on agents with multiple fallback options. These helpers are designed to be reusable across different parts of the system to ensure consistent data handling and error resilience."""
+
 def safe_json(obj: Any) -> str:
     try:
         return json.dumps(obj, indent=2, ensure_ascii=False, default=str)

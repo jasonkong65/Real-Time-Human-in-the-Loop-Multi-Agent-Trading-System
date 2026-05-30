@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystHistoricalMixin:
-
+    """Mixin for analyzing historical price data to extract features and produce a historical score and signal."""
 
     def analyse_historical(self, multi_quote: dict, validation_result: dict, historical_data: dict) -> dict:
         agent_goal = "Read historical trend, momentum, volatility, RSI and volume."

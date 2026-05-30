@@ -27,6 +27,8 @@ from app_components.charting import get_live_chart_selection
 from app_components.helpers import call_agent_method, historical_to_dataframe
 from app_components.schema_repair import repair_sqlite_schema_without_agent_changes
 
+"""Factory for loading and managing all agents, as well as shared utilities for fetching live chart data based on current sidebar controls with safe fallbacks."""
+
 load_dotenv()
 
 def load_agents():

@@ -29,6 +29,7 @@ from .dqn import DQNNetwork
 
 class RiskFeedbackMixin:
 
+    """Mixin for calculating rewards based on the final signal, future return, and volatility level, and for updating the DQN policy network with new feedback from risk results."""
 
     def calculate_reward(self, final_signal: str, future_return: float, volatility_level: str = "Unknown") -> float:
         future_return = self._safe_float(future_return, 0.0) or 0.0

@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystCombineMixin:
-
+    """Mixin for combining quote and historical analysis results with market context to produce a final analyst view and signal."""
 
     def combine_analysis(self, multi_quote: dict, validation_result: dict, quote_result: dict, historical_result: dict) -> dict:
         agent_goal = "Combine quote, historical, market and sector context into one analyst view."

@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingWorkflowMixin:
 
+    """Mixin for the overall training workflow in the TrainingAgent, including methods to automatically train and select models based on historical data, load existing models, decide when to retrain, and provide various interfaces for training from different data sources. The core method _auto_train orchestrates the entire process of feature engineering, model evaluation, selection, and saving, while other methods handle loading and decision logic."""
 
     def _auto_train(
         self,

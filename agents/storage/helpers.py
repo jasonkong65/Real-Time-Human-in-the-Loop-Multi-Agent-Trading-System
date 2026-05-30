@@ -27,6 +27,7 @@ except Exception:
 
 class StorageHelpersMixin:
 
+    """Helper methods for the StorageAgent, including ID generation, JSON serialization, symbol normalization, safe type conversion, nested dictionary access, and period parsing."""
 
     def _now_utc(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")

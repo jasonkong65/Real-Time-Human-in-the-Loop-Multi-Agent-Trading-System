@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystQuoteMixin:
-
+    """Mixin for analyzing live quote data to extract short-term price action features and produce a quote score and signal."""
 
     def analyse_quote_level(self, multi_quote: dict, validation_result: dict) -> dict:
         agent_goal = "Read the latest quote and score short-term price action."

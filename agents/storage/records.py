@@ -27,6 +27,7 @@ except Exception:
 
 class StorageRecordMixin:
 
+    """Mixin for recording various types of data, including pipeline runs, agent outputs, market quotes, paper decisions, reward updates, DQN replay transitions, training runs, LLM reports, screener runs, and bundled pipeline data. Each method normalizes input data, generates unique IDs and timestamps, and upserts or inserts records into the appropriate database tables."""
 
     def create_pipeline_run(
         self,

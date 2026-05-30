@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystMarketContextMixin:
-
+    """Mixin for analyzing market context, including benchmark and sector trends, to adjust the analyst's view of a stock."""
 
     def _read_context_cache(self) -> Dict[str, Any]:
         if not self.cache_path.exists():

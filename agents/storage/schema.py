@@ -27,6 +27,7 @@ except Exception:
 
 class StorageSchemaMixin:
 
+    """Mixin for defining the database schema and initialization logic for the StorageAgent, including methods to create necessary tables and indexes, maintain schema versioning, and perform compatibility migrations for reward updates and paper decisions."""
 
     def _ensure_reward_compatible_schema(self) -> None:
         """

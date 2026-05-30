@@ -1,5 +1,6 @@
 import streamlit as st
 
+"""Main page component for the multi-agent stock research system, responsible for configuring the Streamlit page, applying global styles, and orchestrating the rendering of the sidebar and main content area. This component serves as the entry point for the user interface, setting up the overall layout and visual design while delegating specific functionality to other components like the sidebar and charting modules."""
 
 def configure_page() -> None:
     st.set_page_config(

@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingHelpersMixin:
 
+    """Mixin for helper methods in the TrainingAgent, including methods for time handling, model path management, safe type conversion, label cleaning, model age calculation, and auto-retraining logic based on model version and age."""
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")

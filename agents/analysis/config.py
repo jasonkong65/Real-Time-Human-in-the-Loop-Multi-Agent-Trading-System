@@ -17,7 +17,7 @@ except Exception:
 
 
 class AnalystConfigMixin:
-
+    """Mixin for loading and managing analyst agent configuration, including default settings and user overrides from a JSON file."""
 
     def _load_config(self) -> Dict[str, Any]:
         config = json.loads(json.dumps(self.DEFAULT_CONFIG))

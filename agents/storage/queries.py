@@ -27,6 +27,7 @@ except Exception:
 
 class StorageQueryMixin:
 
+    """Mixin for querying stored data, including methods to retrieve recent pipeline runs, agent outputs, screener runs, paper decisions, reward updates, and to generate summaries and datasets for evaluation and diagnostics."""
 
     def get_recent_pipeline_runs(self, limit: int = 10) -> List[Dict[str, Any]]:
         return self.backend.query(

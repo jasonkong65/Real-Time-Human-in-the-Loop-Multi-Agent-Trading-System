@@ -30,6 +30,7 @@ from sklearn.metrics import (
 
 class TrainingDriftMixin:
 
+    """Mixin for performing feature drift checks in the TrainingAgent, including methods to create lightweight feature distribution snapshots and compare them against previous snapshots to generate drift reports that can inform training decisions and diagnostics."""
 
     def _feature_snapshot(self, X: pd.DataFrame) -> Dict[str, Dict[str, float]]:
         """Small feature-distribution snapshot for drift checks."""

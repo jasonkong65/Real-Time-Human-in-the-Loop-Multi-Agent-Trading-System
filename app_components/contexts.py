@@ -3,6 +3,8 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+"""Context builders for the analyst agent, including portfolio context based on current position and market value, and event context based on upcoming earnings dates and associated risk levels. These contexts can be used to inform the analyst's view of a stock and adjust its analysis and recommendations accordingly."""
+
 def build_portfolio_context(
     has_position: bool,
     shares: float,

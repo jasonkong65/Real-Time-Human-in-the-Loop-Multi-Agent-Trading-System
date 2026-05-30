@@ -12,6 +12,8 @@ from app_components.helpers import (
     selected_price_from_quote,
 )
 
+"""Workflows for orchestrating the execution of multiple agents in a coordinated manner based on user inputs and selected modules. The main workflow function run_selected_workflow takes care of running the appropriate agents based on the user's choices in the sidebar, while handling errors gracefully and storing results in session state for rendering. The run_single_stock_pipeline function encapsulates the entire flow of fetching data, validating it, analyzing it, training models, generating signals, assessing risk, planning strategy, recording decisions, and generating reports for a single stock based on the user's intent and context. Additional workflows include summarising financial news and generating screener reports."""
+
 def run_single_stock_pipeline(
     symbol: str,
     user_question: str,

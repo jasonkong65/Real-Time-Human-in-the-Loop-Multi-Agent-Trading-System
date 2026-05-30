@@ -5,6 +5,7 @@ import streamlit as st
 from app_components.charting import ensure_live_chart_state, get_live_chart_selection
 from app_components.helpers import clean_symbol
 
+"""Component for rendering the left control panel and returning the selected settings."""
 
 def render_sidebar() -> Dict[str, Any]:
     """Render the left control panel and return the selected settings."""
