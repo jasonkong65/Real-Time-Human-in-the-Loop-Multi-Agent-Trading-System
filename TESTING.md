@@ -7,8 +7,8 @@ The tests are designed to run without real market/API calls. The pytest setup st
 ## Run tests locally
 
 ```bash
-pip install -r requirements.txt
-pytest -q
+python -m pip install -r requirements.txt
+python -m pytest -q
 ```
 
 For a basic syntax check, run:
