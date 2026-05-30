@@ -56,10 +56,13 @@ source .venv/bin/activate
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 The main packages are `streamlit`, `pandas`, `yfinance`, `requests`, `scikit-learn`, `joblib`, `torch`, `groq`, `python-dotenv`, and `pytest`.
+
+Using `python -m ...` is recommended because it runs the command from the active virtual environment. This avoids common Windows PowerShell issues where `streamlit` or `pytest` is installed but not recognised as a direct command.
 
 ### 4. Add environment variables
 
@@ -98,20 +101,20 @@ This is safe to run more than once. It adds missing compatibility columns withou
 ### 6. Run the app
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 If Streamlit keeps showing an old cached interface, run:
 
 ```bash
-streamlit cache clear
-streamlit run app.py
+python -m streamlit cache clear
+python -m streamlit run app.py
 ```
 
 ### 7. Run tests
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
 
 The test suite checks imports, helper functions, SQLite storage, workflow helpers, Risk Agent behaviour, Training Agent basics, and several agent-level smoke tests.
@@ -367,6 +370,30 @@ To generate evaluator metrics:
 `DQN Ready = False` is normal during early use. The DQN needs enough completed replay samples before it can train meaningfully.
 
 A replay sample is created only after a paper decision has a completed reward result. Before enough replay samples exist, the DQN remains early-stage and advisory.
+
+---
+
+## Common command issues
+
+If PowerShell says `pytest` is not recognised, run:
+
+```powershell
+python -m pip install pytest
+python -m pytest -q
+```
+
+If PowerShell says `streamlit` is not recognised, run:
+
+```powershell
+python -m pip install streamlit
+python -m streamlit run app.py
+```
+
+If several packages are missing, reinstall the full requirements file inside the activated virtual environment:
+
+```powershell
+python -m pip install -r requirements.txt
+```
 
 ---
 
