@@ -1,64 +1,64 @@
 {
   "finnhub:AAPL": {
-    "cached_at": 1780077714.4882815,
-    "ttl_seconds": 30,
+    "cached_at": 1780107675.9413023,
+    "ttl_seconds": 900,
     "payload": {
       "source": "Finnhub",
       "success": true,
       "symbol": "AAPL",
-      "current_price": 309.73,
-      "open_price": 311.49249999999995,
+      "current_price": 312.06,
+      "open_price": 311.775,
       "high_price": 315.0,
       "low_price": 309.53,
       "previous_close": 312.51,
-      "timestamp": 1780077698,
-      "timestamp_iso": "2026-05-29T18:01:38+00:00",
-      "data_age_seconds": 16.49,
+      "timestamp": 1780084800,
+      "timestamp_iso": "2026-05-29T20:00:00+00:00",
+      "data_age_seconds": 22875.94,
       "attempts": 1,
       "raw_response": {
-        "c": 309.73,
-        "d": -2.78,
-        "dp": -0.8896,
+        "c": 312.06,
+        "d": -0.45,
+        "dp": -0.144,
         "h": 315,
         "l": 309.53,
-        "o": 311.49249999999995,
+        "o": 311.775,
         "pc": 312.51,
-        "t": 1780077698
+        "t": 1780084800
       },
       "from_cache": false,
-      "cache_ttl_seconds": 30
+      "cache_ttl_seconds": 900
     }
   },
   "alpha_vantage:AAPL": {
-    "cached_at": 1780077714.9900262,
-    "ttl_seconds": 300,
+    "cached_at": 1780107676.915291,
+    "ttl_seconds": 1800,
     "payload": {
       "source": "Alpha Vantage",
       "success": true,
       "symbol": "AAPL",
-      "current_price": 312.51,
-      "open_price": 310.68,
-      "high_price": 312.8,
-      "low_price": 309.57,
-      "previous_close": 310.85,
-      "latest_trading_day": "2026-05-28",
+      "current_price": 312.06,
+      "open_price": 311.775,
+      "high_price": 315.0,
+      "low_price": 309.53,
+      "previous_close": 312.51,
+      "latest_trading_day": "2026-05-29",
       "attempts": 1,
       "raw_response": {
         "Global Quote": {
           "01. symbol": "AAPL",
-          "02. open": "310.6800",
-          "03. high": "312.8000",
-          "04. low": "309.5700",
-          "05. price": "312.5100",
-          "06. volume": "48220390",
-          "07. latest trading day": "2026-05-28",
-          "08. previous close": "310.8500",
-          "09. change": "1.6600",
-          "10. change percent": "0.5340%"
+          "02. open": "311.7750",
+          "03. high": "315.0000",
+          "04. low": "309.5300",
+          "05. price": "312.0600",
+          "06. volume": "69508526",
+          "07. latest trading day": "2026-05-29",
+          "08. previous close": "312.5100",
+          "09. change": "-0.4500",
+          "10. change percent": "-0.1440%"
         }
       },
       "from_cache": false,
-      "cache_ttl_seconds": 300
+      "cache_ttl_seconds": 1800
     }
   },
   "finnhub:MSFT": {
