@@ -29,14 +29,18 @@ def render_error_if_needed() -> None:
 
 
 def render_start_message() -> None:
-    st.info("Enter a stock symbol, choose what you want to query, then click **Run selected research**.")
+    st.info("Enter a stock symbol, choose the analysis modules, then click **Run selected research**.")
     st.markdown(
         """
-        Suggested demo flow:
-        1. Enter `AAPL` or `MSFT`.
-        2. Choose **Single-stock agent pipeline** and **Price chart**.
-        3. Add holding context if you want a portfolio-aware strategy.
-        4. Add **Financial news / report summary** for source-grounded news.
+        #### How to use this system
+
+        1. Enter a stock ticker, such as `AAPL`, `MSFT`, or `NVDA`.
+        2. For a normal stock check, keep **Single-stock agent pipeline** and **Price chart** selected.
+        3. Click **Run selected research** to let the agents collect data, validate sources, analyse the stock, assess risk, and generate a plain-language report.
+        4. Read the **Research Summary** first. It shows the price, analyst signal, model signal, risk level, and strategy suggestion.
+        5. Use the **Chart** tab to change the chart period or refresh chart data without rerunning the whole pipeline.
+        6. Optional: add portfolio context if you already hold the stock, or run the News / Report Agent and Watchlist Screener when you need extra context.
+        7. Check **Agent Responses**, **Evaluator**, and **Storage / Logs** if you want to inspect the technical outputs and saved paper-decision history.
         """
     )
 
