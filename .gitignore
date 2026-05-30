@@ -15,3 +15,12 @@ data/historical/*.parquet
 data/historical/metadata/
 docs/
 ui_sessions/
+# Generated model and training artifacts
+models/*.pkl
+models/*.pt
+models/*.metadata.json
+models/optimizer_metadata_*.json
+models/training_diagnostics_metadata_*.json
+# Runtime reward mirrors; keep only headers or regenerate locally
+data/pending_rewards.csv
+data/reward_history.csv
