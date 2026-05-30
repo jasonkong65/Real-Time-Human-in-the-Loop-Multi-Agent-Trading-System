@@ -1,163 +1,65 @@
 # Human-in-the-Loop Multi-Agent Stock Research System
 
-This project is a Streamlit stock-research prototype built for paper decision support. It does not connect to a broker and it does not place real trades. The goal is to show how several specialised software agents can work together to collect market data, check data quality, analyse a stock, control risk, explain the result, and save the full research session for later evaluation.
+A Streamlit-based stock research prototype that shows how several specialised agents can work together to support **paper trading research**.
 
-The project is designed as a coursework/demo system. It is useful for showing agent coordination, human-in-the-loop decision making, memory, delayed feedback, and risk-aware reporting. It should not be treated as financial advice.
+The system does not connect to a broker and it does not place real trades. Instead, it collects market data, checks data quality, analyses a selected stock, applies risk controls, explains the result in plain language, and stores the session so later paper outcomes can be reviewed.
+
+This project is built mainly for coursework and demonstration. It is useful for showing agent coordination, human-in-the-loop decision making, persistent memory, delayed feedback, model diagnostics, and risk-aware reporting.
+
+> **Important:** This project is not financial advice. All outputs should be treated as research notes for demonstration only.
 
 ---
 
-## Project purpose
+## What this project does
 
-The system answers questions such as:
+The app helps a user explore questions such as:
 
-- What does the current data say about a stock such as `AAPL`?
-- Is the stock only worth monitoring, or is it a possible paper-research candidate?
-- Are there any data-quality or timing risks?
+- What does the current data suggest about a stock such as `AAPL`, `MSFT`, `NVDA`, or `TSLA`?
+- Is the stock only worth monitoring, or does it look like a possible paper-research candidate?
+- Are there data-quality issues, stale prices, entry-timing risks, or weak model-confidence signals?
 - Which stocks in a small watchlist look stronger or riskier?
-- How can the result be explained to a normal user in plain English?
+- How can the system explain the result in clear, non-technical language?
 
-The main design idea is that no single model makes the whole decision. Each agent has a small responsibility:
-
-1. collect data;
-2. validate the data;
-3. analyse technical conditions;
-4. train or load a signal model;
-5. apply risk control;
-6. create a cautious paper strategy;
-7. explain the result;
-8. store the session and evaluate delayed outcomes later.
-
-The human user stays in control. The app gives research guidance, not trade execution.
+The main design idea is simple: **no single agent makes the whole decision alone**. Each agent handles one part of the workflow, and the final output is still reviewed by the human user.
 
 ---
 
-## Installation
-
-### 1. Clone or unzip the project
-
-```bash
-git clone https://github.com/jasonkong65/Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System.git
-cd Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System
-```
-
-If you are using the submitted zip file, unzip it first and then open the project folder.
-
-### 2. Create a virtual environment
-
-On Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-```
-
-On macOS or Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-The main dependencies are:
-
-- `streamlit` for the web UI;
-- `pandas` for data handling;
-- `yfinance` for historical price downloads;
-- `requests` for external API calls;
-- `scikit-learn` and `joblib` for the signal model;
-- `torch` for the DQN risk layer;
-- `groq` for optional LLM explanations;
-- `python-dotenv` for local API keys.
-
-### 4. Create the environment file
-
-Copy the example file:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell:
-
-```powershell
-copy .env.example .env
-```
-
-Then edit `.env` and add the keys you want to use:
-
-```text
-FINNHUB_API_KEY=your_finnhub_key
-ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
-GROQ_API_KEY=your_groq_key
-```
-
-The app can still open without every key, but some live-data or LLM features may use fallback behaviour.
-
-### 5. Repair or initialise SQLite if needed
-
-If you have an older local database from a previous run, repair the schema before starting the app:
-
-```bash
-python scripts/repair_sqlite_schema.py
-```
-
-This is safe to run multiple times. It only adds missing compatibility columns and keeps existing records.
-
-### 6. Start the Streamlit app
-
-```bash
-streamlit run app.py
-```
-
-If the UI behaves strangely after code changes, clear Streamlit cache first:
-
-```bash
-streamlit cache clear
-streamlit run app.py
-```
-
----
-
-## Workflow
+## Main workflow
 
 The normal single-stock workflow is:
 
 ```text
 User input
   |
-  |-- stock symbol
+  |-- ticker symbol
   |-- selected modules
-  |-- optional holding / event context
+  |-- optional holding or event context
   v
 Data Agent
   |
   |-- fetches live quote data
-  |-- uses cache to reduce API pressure
+  |-- uses caching to reduce API pressure
   v
 Validation Agent
   |
-  |-- checks price consistency, stale data, and source reliability
+  |-- checks source reliability
+  |-- checks stale data and price consistency
   v
 Historical Data Agent
   |
   |-- loads or downloads OHLCV history
-  |-- stores historical data through SQLite-first storage
+  |-- stores and reuses data through SQLite
   v
 Analyst Agent
   |
-  |-- quote-level analysis
-  |-- historical trend, momentum, volatility, RSI, and volume analysis
-  |-- combined analyst score and entry-risk label
+  |-- analyses trend, momentum, volatility, RSI, and volume
+  |-- creates an analyst score and entry-risk label
   v
 Training Agent
   |
-  |-- trains or loads a signal model
+  |-- trains or loads the signal model
+  |-- runs automatic model diagnostics inside the stock pipeline
+  |-- updates the saved model only if the quality gate accepts a better candidate
   |-- produces a model signal such as HOLD, BUY_CANDIDATE, or SELL_RISK
   v
 Risk Agent
@@ -168,7 +70,7 @@ Risk Agent
   v
 Strategist Agent
   |
-  |-- creates a paper decision plan
+  |-- turns the risk-controlled signal into a paper decision plan
   |-- explains whether to monitor, wait, reduce risk, or research further
   v
 LLM Report Agent
@@ -183,25 +85,148 @@ Storage / Execution / Reward / Evaluator
   |-- evaluates results when enough future data is available
 ```
 
-There are also two optional branches:
+Optional branches:
 
 ```text
 News / Report Agent
   -> summarises company news, financial context, or pasted report text.
 
 Watchlist Screener Agent
-  -> ranks a small user-provided watchlist into research candidates and caution candidates.
+  -> ranks a small watchlist into research candidates and caution candidates.
+
+Training Agent diagnostics
+  -> runs automatically as part of the Training Agent.
+     It is not a separate user-facing agent and does not need a manual checkbox.
 ```
 
 ---
 
-## How to use
+## Key features
+
+- Multi-agent stock research pipeline
+- Human-in-the-loop paper decision support
+- Live quote and historical OHLCV data handling
+- Data validation before analysis
+- Technical analysis using trend, momentum, volatility, RSI, and volume signals
+- Automatic Training Agent diagnostics and model-quality checks
+- Risk control with hard safety rules and a DQN advisory layer
+- Plain-language LLM report generation when a Groq API key is available
+- Watchlist screener for comparing a small group of tickers
+- Coloured summary cards for easier interpretation
+- SQLite-first memory for prices, runs, agent outputs, training metadata, reports, and paper rewards
+- Delayed reward evaluation for paper decisions
+- Clear safety framing: education and demonstration only
+
+---
+
+## Installation
+
+### 1. Clone or unzip the project
+
+```bash
+git clone https://github.com/jasonkong65/Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System.git
+cd Real-Time-Human-in-the-Loop-Multi-Agent-Trading-System
+```
+
+If you are using a submitted zip file, unzip it first and then open the project folder.
+
+### 2. Create a virtual environment
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+```
+
+macOS or Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Main packages used by the project include:
+
+- `streamlit` for the web interface
+- `pandas` for data handling
+- `yfinance` for historical price data
+- `requests` for API calls
+- `scikit-learn` and `joblib` for the signal model
+- `torch` for the DQN risk layer
+- `groq` for optional LLM explanations
+- `python-dotenv` for local environment variables
+
+### 4. Create the environment file
+
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+copy .env.example .env
+```
+
+Then add your local keys:
+
+```text
+FINNHUB_API_KEY=your_finnhub_key
+ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
+GROQ_API_KEY=your_groq_key
+```
+
+The app can still open without every key. If a key is missing, the related live-data or LLM feature may fall back to a limited mode.
+
+### 5. Repair or initialise SQLite if needed
+
+If you have an older local database from a previous run, run:
+
+```bash
+python scripts/repair_sqlite_schema.py
+```
+
+This script is safe to run more than once. It adds missing compatibility columns without deleting existing records.
+
+### 6. Start the app
+
+```bash
+streamlit run app.py
+```
+
+If Streamlit still shows old UI behaviour after code changes, clear its cache first:
+
+```bash
+streamlit cache clear
+streamlit run app.py
+```
+
+---
+
+## How to use the app
 
 ### Single-stock analysis
 
-1. Open the app with `streamlit run app.py`.
-2. Enter a ticker such as `AAPL`, `MSFT`, `NVDA`, or `TSLA`.
-3. Choose the core modules, usually:
+1. Start the app with `streamlit run app.py`.
+2. Enter a ticker, for example:
+
+```text
+AAPL
+MSFT
+NVDA
+TSLA
+```
+
+3. Keep the usual core modules selected:
 
 ```text
 Single-stock agent pipeline
@@ -209,7 +234,7 @@ Price chart
 ```
 
 4. Click **Run selected research**.
-5. Read the cards at the top for the quick result:
+5. Review the coloured summary cards at the top:
 
 ```text
 Symbol
@@ -220,12 +245,20 @@ Risk
 Strategy
 ```
 
-6. Read the **Groq / Report Agent Output** for the plain-English explanation.
-7. Open **Agent Responses** if you want to inspect the structured output from each agent.
+The colours are only there to make the result easier to scan:
+
+- green usually means supportive or lower risk;
+- amber means watchlist or caution;
+- red means higher risk;
+- blue or teal usually means data context;
+- purple usually means strategy guidance.
+
+6. Read **Groq / Report Agent Output** for the plain-language explanation.
+7. Open **Agent Responses** only if you want to inspect the structured output from each agent.
 
 ### Chart period
 
-The chart period is controlled below the chart. Changing the period refreshes the chart without rerunning the whole agent pipeline.
+The chart period selector sits below the chart. Changing it refreshes the chart without rerunning the full agent pipeline.
 
 Supported periods:
 
@@ -238,19 +271,21 @@ Supported periods:
 2 Years
 ```
 
-### Portfolio context
+### Portfolio and event context
 
-Use portfolio context only when you want the strategy to consider an existing paper position. For example, you can tell the app that you currently hold the stock, with a paper quantity and average cost. The Strategist Agent then gives more relevant guidance such as monitoring exposure or avoiding additional risk.
+The portfolio and event fields are optional. Use them when you want the strategy to consider an existing paper position, average cost, earnings date, or other known event risk.
+
+For example, if the user already holds a paper position, the Strategist Agent can respond more carefully by discussing exposure, monitoring, or avoiding additional risk.
 
 ### News / report mode
 
-Turn on the News / Report Agent only when you want news or report explanation. You can either let the system fetch company-specific context, or paste your own financial/news text.
+Use the News / Report Agent when you want a company-news or report explanation. You can either let the system fetch company-specific context or paste your own news/report text.
 
-This input box is for report or news text, not for another ticker symbol.
+The pasted text box is for news or report content. It is not for entering a second ticker symbol.
 
 ### Watchlist screener
 
-Turn on the Watchlist Screener Agent when you want to compare a group of stocks. Enter a comma-separated list such as:
+Use the Watchlist Screener Agent when you want to compare several stocks at once. Enter a comma-separated list such as:
 
 ```text
 AAPL, MSFT, NVDA, TSLA, GOOGL, AMZN, META, AMD, NFLX
@@ -258,71 +293,81 @@ AAPL, MSFT, NVDA, TSLA, GOOGL, AMZN, META, AMD, NFLX
 
 The screener returns:
 
-- candidates for further research;
+- research candidates;
 - caution candidates;
 - buy score;
 - risk score;
 - sector;
 - liquidity filter status.
 
-The screener is a watchlist ranking tool. It is not a full-market scanner.
+This is a watchlist-ranking tool, not a full-market scanner and not a buy/sell recommendation.
 
 ---
 
-## Main features
+## Training Agent diagnostics
 
-### Multi-agent research pipeline
+The Training Agent now handles model diagnostics automatically during the single-stock pipeline.
 
-The app separates the workflow into specialised agents. This makes the system easier to explain and easier to debug than a single all-in-one model.
+There is no separate sidebar checkbox for this because model maintenance is an internal system task, not something a normal user should need to manage manually.
 
-### Plain-language user output
+During this step, the Training Agent can:
 
-The app does not only show raw JSON. The main result is written as a user-facing explanation. More technical outputs are still available in expandable sections for inspection.
+- compare model candidates;
+- run walk-forward validation;
+- record feature-importance information;
+- check model-quality metrics;
+- decide whether the saved signal model should be updated.
 
-### Watchlist screening
+The saved model is updated only when the internal quality gate decides that a new candidate is clearly better. If diagnostics fail, the main stock research result can still be reviewed.
 
-The screener can rank a small universe of user-provided tickers. It is useful for a demo because it shows that the project can handle more than one symbol, while still staying within a safe and understandable scope.
-
-### SQLite-first memory
-
-Most important results are stored in SQLite, including historical prices, pipeline runs, agent outputs, paper decisions, reward updates, DQN replay samples, screener runs, LLM reports, and UI sessions.
-
-### Paper decision evaluation
-
-The system can record paper decisions and evaluate them later when the reward horizon is complete. This provides a feedback loop for the Evaluator Agent and the DQN replay layer.
+This keeps the app practical for a demo: the model can be maintained automatically, while the user only sees the final research output.
 
 ---
 
 ## Agents and responsibilities
 
-| Agent | Responsibility |
+| Agent | Main responsibility |
 |---|---|
-| `DataAgent` | Fetches live quote data, handles API caching, and tracks market-session status. |
-| `ValidationAgent` | Checks source reliability, price differences, stale dates, and whether analysis should continue. |
-| `HistoricalDataAgent` | Loads or downloads OHLCV history and stores/reuses it through the database layer. |
-| `AnalystAgent` | Scores quote movement, historical trend, momentum, volatility, RSI, volume, and entry timing risk. |
-| `TrainingAgent` | Trains or loads the signal model using walk-forward validation and model comparison. |
-| `TrainingOptimizerAgent` | Backward-compatible wrapper around the Training Agent's automatic model-selection process. |
-| `RiskAgent` | Applies hard risk rules and uses a PyTorch DQN layer as an advisory risk-control component. |
-| `StrategistAgent` | Converts the final risk-controlled signal into a cautious paper strategy. |
-| `RewardAgent` | Records paper decisions and creates delayed reward horizons. |
-| `EvaluatorAgent` | Reviews completed paper rewards, strategy performance, and DQN replay readiness. |
-| `ScreenerAgent` | Ranks a watchlist into research candidates and caution candidates. |
-| `LLMReportAgent` | Explains single-stock, screener, news, or report results in plain language. |
-| `StorageAgent` | Main persistent memory layer using SQLite by default. |
-| `ExecutionAgent` | Records UI sessions and audit snapshots. It is not a real execution agent. |
-| `DatabaseBackend` | Small database adapter used by StorageAgent. SQLite is default; PostgreSQL-style URLs are supported for later deployment. |
+| `DataAgent` | Fetches live quote data from configured sources and caches results. |
+| `ValidationAgent` | Checks source reliability, stale data, price differences, and whether analysis should continue. |
+| `HistoricalDataAgent` | Loads or downloads OHLCV history and works with the SQLite-first storage layer. |
+| `AnalystAgent` | Builds quote-level and historical technical analysis using trend, momentum, volatility, RSI, and volume. |
+| `TrainingAgent` | Trains or loads the signal model, generates model signals, and runs automatic diagnostics during the stock pipeline. |
+| `RiskAgent` | Applies hard safety rules and uses DQN as an advisory risk-control layer. |
+| `StrategistAgent` | Converts the risk-controlled signal into a cautious paper decision plan. |
+| `LLMReportAgent` | Explains structured outputs in normal language and summarises news or report context. |
+| `ScreenerAgent` | Scores a watchlist and returns research candidates and caution candidates. |
+| `RewardAgent` | Records paper decisions and prepares delayed reward updates. |
+| `EvaluatorAgent` | Reviews completed rewards, paper-decision history, and DQN readiness. |
+| `StorageAgent` | Saves historical prices, pipeline runs, agent outputs, rewards, training metadata, and reports. |
+| `ExecutionAgent` | Records UI sessions and saves an audit trail of what the user ran. |
+
+The code is organised so larger agents can be split into folders such as:
+
+```text
+agents/risk/
+agents/storage/
+agents/analysis/
+agents/training/
+```
+
+Small compatibility files such as `agents/risk_agent.py`, `agents/storage_agent.py`, `agents/analyst_agent.py`, and `agents/training_agent.py` can still remain at the top level of `agents/` so imports stay simple.
+
+The important point is that **Training Optimizer is treated as part of the Training Agent workflow**, not as a separate standalone agent in the user-facing design.
 
 ---
 
-## DQN
+## DQN risk layer
 
-The project uses DQN inside the Risk Agent. The DQN is not the only decision maker and it is not allowed to override the hard safety rules.
+The Risk Agent includes a DQN-style advisory layer. It uses PyTorch components such as a Q-network, target network, replay memory, and feedback from delayed paper rewards.
 
-The risk layer has two parts:
+The DQN is not allowed to override the hard safety rules. The risk system has two layers:
 
-1. **Hard safety rules** for non-negotiable conditions such as weak data confidence, high risk, or unsafe model signals.
-2. **DQN advisory layer** using PyTorch to learn from delayed paper reward feedback.
+1. **Hard safety rules**  
+   These handle non-negotiable conditions such as weak data confidence, high risk, or unsafe model signals.
+
+2. **DQN advisory layer**  
+   This learns from delayed paper reward feedback after enough completed reward samples exist.
 
 The DQN-related files are organised under:
 
@@ -335,94 +380,90 @@ agents/risk/
   feedback.py
 ```
 
-The DQN components include:
-
-- a small neural network for Q-values;
-- a policy network and target network;
-- replay memory;
-- reward feedback from completed paper decisions;
-- a minimum replay-sample requirement before treating DQN learning as meaningful.
-
-The final output remains cautious. If the DQN suggests something risky, the hard safety layer can still downgrade or block the action.
+The final output remains cautious. If the DQN suggests a risky action, the hard safety rules can still downgrade or block the decision.
 
 ---
 
-## SQLite
+## SQLite memory
 
-SQLite is the primary storage layer for the project. The default database file is:
+SQLite is the main local memory layer for the project. The default database file is:
 
 ```text
 data/trading_system.db
 ```
 
-The database stores:
+Important stored records include:
 
-- historical prices;
-- historical metadata;
-- live market quotes;
-- pipeline runs;
-- agent outputs;
-- paper decisions;
-- delayed reward updates;
-- DQN replay samples;
-- training runs;
-- screener runs;
-- LLM reports;
-- UI sessions and session artifacts.
+```text
+historical_prices
+historical_metadata
+market_quotes
+pipeline_runs
+agent_outputs
+paper_decisions
+reward_updates
+risk_dqn_replay
+training_runs
+screener_runs
+llm_reports
+ui_sessions
+ui_agent_records
+ui_chart_records
+```
 
-Some CSV files are still kept for seed data, fallback, or backward compatibility. The main project memory, however, is SQLite-first.
+CSV files may still be kept for seed data, fallback, or backward compatibility, but the main project design is SQLite-first.
 
-If the local database was created by an older version of the project, run:
+If the local database was created by an older version, run:
 
 ```bash
 python scripts/repair_sqlite_schema.py
 ```
 
-This repairs missing compatibility columns such as reward horizon fields without deleting old data.
+This repairs missing compatibility columns, such as reward-horizon fields, without deleting old data.
 
 ---
 
-## The price may be slightly different from real finance pages
+## Why the displayed price may differ from finance websites
 
-The price shown in the app may be slightly different from Google Finance, Yahoo Finance, or a broker page. This is expected.
+The app may show a price that is slightly different from Google Finance, Yahoo Finance, or a broker page. This is normal for a research prototype.
 
-Possible reasons include:
+Common reasons include:
 
 - different data providers;
 - delayed quotes;
-- caching inside the app;
-- regular market vs pre-market/post-market handling;
+- cached values inside the app;
+- regular-market versus pre-market or post-market handling;
 - different refresh timestamps;
-- adjusted close vs live quote differences.
+- adjusted close versus latest quote differences.
 
-For this project, a small difference is acceptable because the app is a paper research prototype, not a real-time trading execution system. The UI also shows chart source and fetch time to make the data timing clearer.
+For this project, a small difference is acceptable because the system is not a real-time trading execution platform. The UI shows source and timestamp information so the user can understand where the displayed price came from.
 
 ---
 
-## Evaluator shows N/A
+## Why evaluator metrics may show `N/A`
 
-`Reward Win Rate`, `Directional Win Rate`, and `Average Reward` can show `N/A` at the start. This usually means the system has recorded paper decisions, but the future reward windows have not completed yet.
+The Evaluator may show `N/A` for reward win rate, directional win rate, or average reward.
 
-For example, if a paper decision has a 7-day or 30-day horizon, the system cannot fairly judge the outcome immediately. It needs later price data first.
+This usually means the system has recorded paper decisions, but the reward horizons have not completed yet. For example, if a paper decision has a 7-day or 30-day horizon, the system needs future price data before it can fairly calculate the result.
 
-To get evaluator metrics:
+To generate evaluator metrics:
 
 1. run the single-stock pipeline several times;
-2. keep **Record paper decision / memory** enabled;
+2. keep paper decision recording enabled;
 3. wait until at least one reward horizon is complete;
-4. run the Evaluator tab again.
+4. run the Evaluator again.
 
-Until then, `N/A` is a correct early-stage result, not a crash.
+Until enough future data exists, `N/A` is the correct honest result. It is not a crash.
 
 ---
 
-## DQN Ready is False
+## Why `DQN Ready` may be false
 
-`DQN Ready: False` is also normal in early runs.
+`DQN Ready = False` is normal during early use.
 
-The DQN needs enough replay samples before its training output is useful. A replay sample is created only after a paper decision has a completed reward result. If there are no completed rewards, there is no meaningful DQN replay memory yet.
+The DQN needs enough completed replay samples before its training output becomes meaningful. A replay sample is created only after a paper decision has a completed reward result.
 
-The project intentionally avoids pretending the DQN is ready before enough feedback exists. This is safer and more honest for a coursework prototype.
+Before enough replay samples exist, the DQN should be treated as early-stage and advisory only. The system intentionally avoids pretending the DQN is ready before there is enough feedback.
 
 ---
 
@@ -439,4 +480,4 @@ It does not:
 - recommend leverage;
 - replace the user's own judgement.
 
-All outputs should be read as research notes. A user should always check the original data source, company news, valuation, event risk, and their own risk tolerance before making any real financial decision outside this prototype.
+All outputs should be read as research notes. Before making any real financial decision outside this prototype, a user should check the original data source, company news, valuation, event risk, and their own risk tolerance.
