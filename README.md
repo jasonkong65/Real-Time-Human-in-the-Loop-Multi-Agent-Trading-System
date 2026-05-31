@@ -121,7 +121,9 @@ The test suite checks imports, helper functions, SQLite storage, workflow helper
 
 ### 8. Demo video and report
 
-[Watch the 2-minute demo](docs/demo/assignment2_demo_2min.mp4)
+The demo video is included in the GitHub repository under `docs/demo/`.
+
+[Download the 2-minute demo video from `docs/demo/`](docs/demo/assignment2_demo_2min.mp4)
 
 A copy of the report PDF is included at `docs/report/Report.pdf`. For formal submission, the report should also include the GitHub repository link and the demo video link.
 
