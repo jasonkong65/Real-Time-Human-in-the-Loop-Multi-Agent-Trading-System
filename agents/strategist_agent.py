@@ -342,18 +342,18 @@ class StrategistAgent:
         trend_n = trend.title()
         model_conf_n = model_conf.title()
 
-        if final_signal == "BLOCKED" or risk_level_n == "Critical":
-            return "NO_ACTION_DATA_OR_RISK_BLOCK"
-
-        if final_signal == "SELL_RISK" or risk_level_n == "High":
-            return "RISK_REDUCTION_REVIEW"
-
         positive_context = (
             final_signal == "BUY_CANDIDATE"
             or "BULLISH" in analyst_signal
             or "POSITIVE" in analyst_signal
             or "WATCHLIST" in display_signal
         )
+
+        if final_signal == "BLOCKED" or risk_level_n == "Critical":
+            return "NO_ACTION_DATA_OR_RISK_BLOCK"
+
+        if final_signal == "SELL_RISK":
+            return "RISK_REDUCTION_REVIEW"
 
         event_risk = event.get("event_risk", "Unknown")
         high_event_risk = event_risk == "High"
@@ -364,6 +364,9 @@ class StrategistAgent:
 
         if positive_context and risk_level_n in ["Medium", "High"]:
             return "WAIT_FOR_CONFIRMATION"
+
+        if risk_level_n == "High":
+            return "RISK_REDUCTION_REVIEW"
 
         if final_signal == "BUY_CANDIDATE" and risk_level_n == "Low" and model_conf_n in ["Medium", "High"]:
             return "RESEARCH_FOR_POSSIBLE_ENTRY"

@@ -48,12 +48,19 @@ class RiskRulesMixin:
         if validation_action == "BLOCK_ANALYSIS":
             reasons.append("data validation blocked the analysis")
             return "BLOCK_TRADE", reasons
-        if validation_score < 0.35:
+
+        # Only hard-block when the validation layer explicitly blocks the analysis
+        # or when the data confidence is extremely weak. A normal "Low" confidence
+        # result should usually become a cautious watchlist / hold decision rather
+        # than a critical block, especially when the trend and analyst view are still
+        # constructive.
+        if validation_score < 0.25:
             reasons.append("data confidence is too weak")
             return "BLOCK_TRADE", reasons
+
         if model_signal == "BUY_CANDIDATE" and validation_score < 0.50:
             reasons.append("buy signal has weak data support")
-            return "BLOCK_TRADE", reasons
+            return "DOWNGRADE_TO_HOLD", reasons
         if model_signal == "BUY_CANDIDATE" and model_conf < 0.42:
             reasons.append("buy signal has low model confidence")
             return "DOWNGRADE_TO_HOLD", reasons

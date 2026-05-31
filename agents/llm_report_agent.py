@@ -191,6 +191,10 @@ class LLMReportAgent:
         clean = text
         for pattern, replacement in replacements:
             clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
+
+        # Avoid awkward double-negative phrasing after safety wording cleanup.
+        clean = re.sub(r"Do not use no leverage", "Do not use leverage", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"not use no leverage", "not use leverage", clean, flags=re.IGNORECASE)
         return clean.strip()
 
 
@@ -574,10 +578,27 @@ class LLMReportAgent:
         risk_level = human.get("risk_level", "Unknown")
         strategy_level = human.get("strategy_level", "Unknown")
 
-        if risk_signal == "Blocked" or "Block" in strategy_action or risk_level in {"High", "Critical"}:
+        analyst_view = str(human.get("analyst_view", ""))
+        model_view = str(human.get("model_view", ""))
+        positive_watchlist = any(
+            word in f"{analyst_view} {model_view}".lower()
+            for word in ["bullish", "positive", "watchlist", "research candidate"]
+        )
+
+        if (risk_signal == "Blocked" or risk_level == "Critical") and positive_watchlist:
+            direct_answer = (
+                f"For **{symbol}**, the technical picture looks constructive, but the system is **not comfortable making a paper decision yet**. "
+                "The main issue is not the upward trend; it is that the validation or risk gate is not strong enough for a safe paper-entry decision."
+            )
+        elif risk_signal == "Blocked" or "Block" in strategy_action or risk_level == "Critical":
             direct_answer = (
                 f"For **{symbol}**, the system does **not** have enough safe evidence for a paper decision at this stage. "
-                f"The risk-controlled signal is **{risk_signal}**, so the safest research action is **{strategy_action}**."
+                f"The safest research action is **{strategy_action}**."
+            )
+        elif positive_watchlist:
+            direct_answer = (
+                f"For **{symbol}**, the system sees a **positive watchlist setup**, supported by the analyst/model view. "
+                "However, it is **not treated as an immediate paper-entry decision** because the confidence and risk checks still require caution."
             )
         elif "Research Candidate" in risk_signal:
             direct_answer = (
