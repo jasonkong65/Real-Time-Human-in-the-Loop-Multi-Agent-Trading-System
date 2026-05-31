@@ -13,7 +13,6 @@ data/*.db-shm
 data/cache/
 data/historical/*.parquet
 data/historical/metadata/
-docs/
 ui_sessions/
 # Generated model and training artifacts
 models/*.pkl
