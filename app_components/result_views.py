@@ -13,6 +13,7 @@ from app_components.helpers import (
     format_price,
     get_nested,
     selected_price_from_quote,
+    latest_close_from_historical_data,
 )
 from app_components.strategy_view import render_strategy_guidance_plain
 from app_components.ui_helpers import card, card_variant_from_text, render_status_pills
@@ -62,6 +63,10 @@ def render_results(bundle: Dict[str, Any], agents: Dict[str, Any]) -> None:
     llm_result = bundle.get("llm_report_result", {}) or {}
 
     entry_price = selected_price_from_quote(multi_quote, validation_result)
+    price_source_label = "live quote"
+    if entry_price is None:
+        entry_price = latest_close_from_historical_data(bundle.get("historical_data", {}) or bundle.get("chart_historical_data", {}))
+        price_source_label = "latest historical close" if entry_price is not None else "unavailable"
 
     st.markdown("### Research Summary")
 
@@ -87,6 +92,7 @@ def render_results(bundle: Dict[str, Any], agents: Dict[str, Any]) -> None:
     status_items = [
         f"Chart: {live_chart_label} / {live_chart_period} / {live_chart_interval}",
         f"Chart source: {live_chart_metadata.get('source', 'Unknown')}",
+        f"Price source: {price_source_label}",
         f"Validation: {validation_result.get('confidence', 'Unknown')}",
         f"Final signal: {clean_label(risk_result.get('final_signal'))}",
         f"Strategy level: {clean_label(strategy_result.get('strategy_level'))}",
