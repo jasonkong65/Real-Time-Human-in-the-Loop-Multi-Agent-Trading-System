@@ -23,3 +23,5 @@ models/training_diagnostics_metadata_*.json
 # Runtime reward mirrors; keep only headers or regenerate locally
 data/pending_rewards.csv
 data/reward_history.csv
+.pytest_cache/
+**/__pycache__/

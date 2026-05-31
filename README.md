@@ -1,4 +1,4 @@
-# Human-in-the-Loop Multi-Agent Stock Research System
+# Multi-Agent Trading Advisory System
 
 This project is a Streamlit prototype for a human-in-the-loop stock research assistant. It is designed for coursework and demonstration, not for real trading. The system reads market data, checks data quality, runs several specialised agents, applies risk control, explains the output in plain language, and records the session for later paper-decision review.
 
@@ -118,6 +118,12 @@ python -m pytest -q
 ```
 
 The test suite checks imports, helper functions, SQLite storage, workflow helpers, Risk Agent behaviour, Training Agent basics, and several agent-level smoke tests.
+
+### 8. Demo video and report
+
+[Watch the 2-minute demo](docs/demo/assignment2_demo_2min.mp4)
+
+A copy of the report PDF is included at `docs/report/Report.pdf`. For formal submission, the report should also include the GitHub repository link and the demo video link.
 
 ---
 
