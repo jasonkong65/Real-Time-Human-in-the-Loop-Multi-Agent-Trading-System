@@ -1,4 +1,6 @@
 decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,paper_status,open_horizons,next_target_date_utc
+a03419c7-fe4c-4f46-a3a8-e9d2dff10e29,AAPL,312.05999755859375,2026-05-31 01:09:45,symbol=AAPL|validation=Low|model=HOLD|model_conf=Low|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,BLOCK_TRADE,BLOCKED,Critical,PAPER_BLOCKED_NO_ENTRY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-06-01 01:09:45
+8a945bbb-0a22-4e44-8c2b-9fe178ca13d3,AAPL,312.05999755859375,2026-05-31 01:09:37,symbol=AAPL|validation=Low|model=HOLD|model_conf=Low|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,BLOCK_TRADE,BLOCKED,Critical,PAPER_BLOCKED_NO_ENTRY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-06-01 01:09:37
 046fecb9-b43e-41fe-bd26-e0125035168e,AAPL,312.05999755859375,2026-05-31 01:07:38,symbol=AAPL|validation=Low|model=HOLD|model_conf=Low|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,BLOCK_TRADE,BLOCKED,Critical,PAPER_BLOCKED_NO_ENTRY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-06-01 01:07:38
 decision_20260531004419_1df636d782,UNKNOWN,,2026-05-31 00:44:19,,,,,PAPER_MONITOR_ONLY,,
 decision_20260531004318_7b4c4da639,UNKNOWN,,2026-05-31 00:43:18,,,,,PAPER_MONITOR_ONLY,,
