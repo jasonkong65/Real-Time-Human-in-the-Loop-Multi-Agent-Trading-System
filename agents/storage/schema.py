@@ -40,14 +40,30 @@ class StorageSchemaMixin:
         crash with: sqlite3.OperationalError: no such column: target_date_utc.
         """
         paper_specs = {
+            # Columns used by RewardAgent
             "paper_status": "TEXT",
             "entry_time_utc": "TEXT",
             "q_state": "TEXT",
             "duplicate_group_key": "TEXT",
             "risk_result_json": "TEXT",
+            # Columns used by StorageAgent
+            "run_id": "TEXT",
+            "strategy_action": "TEXT",
+            "status": "TEXT",
+            "created_at_utc": "TEXT",
             "updated_at_utc": "TEXT",
+            "raw_json": "TEXT",
         }
         reward_specs = {
+            # Legacy/StorageAgent columns
+            "id": "TEXT",
+            "reward_horizon_days": "INTEGER",
+            "due_at_utc": "TEXT",
+            "final_signal": "TEXT",
+            "strategy_action": "TEXT",
+            "risk_action": "TEXT",
+            "raw_json": "TEXT",
+            # RewardAgent columns
             "update_id": "TEXT",
             "horizon_display": "TEXT",
             "horizon_days": "INTEGER",
@@ -68,6 +84,24 @@ class StorageSchemaMixin:
         for column, column_type in reward_specs.items():
             try:
                 self.backend.add_column_if_missing("reward_updates", column, column_type)
+            except Exception:
+                pass
+
+        # Keep StorageAgent's audit-style replay table compatible with the
+        # strict DQN replay table used by RiskAgent. The two agents share the
+        # same SQLite file, so the table may have been created by either side.
+        dqn_specs = {
+            "created_at_utc": "TEXT",
+            "state_text": "TEXT",
+            "state_vector_json": "TEXT",
+            "action_index": "INTEGER",
+            "next_state_text": "TEXT",
+            "next_state_vector_json": "TEXT",
+            "source": "TEXT",
+        }
+        for column, column_type in dqn_specs.items():
+            try:
+                self.backend.add_column_if_missing("risk_dqn_replay", column, column_type)
             except Exception:
                 pass
 

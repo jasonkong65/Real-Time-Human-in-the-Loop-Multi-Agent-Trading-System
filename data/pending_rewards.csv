@@ -1,6 +1,10 @@
 decision_id,symbol,entry_price,entry_time_utc,q_state,risk_action,final_signal,risk_level,paper_status,open_horizons,next_target_date_utc
-87177578-8054-4bc0-94fd-1208b6fa0ece,MSFT,450.24,2026-05-30 04:14:40,symbol=MSFT|validation=High|model=HOLD|model_conf=Low|analyst=BULLISH_WATCH|trend=Positive|entry_risk=Moderate|volatility=Low,KEEP_SIGNAL,HOLD,Low,PAPER_MONITOR_ONLY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-05-31 04:14:40
-088463b8-dec5-44b2-a64e-22f94390a501,MSFT,442.85,2026-05-29 18:04:17,symbol=MSFT|validation=Low|model=HOLD|model_conf=Low|analyst=BULLISH_WATCH|trend=Positive|entry_risk=Moderate|volatility=Low,KEEP_SIGNAL,HOLD,Medium,PAPER_MONITOR_ONLY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-05-30 18:04:17
-e60b1ab2-ed86-442f-a65d-2ef91767a551,AAPL,310.94,2026-05-29 16:59:11,symbol=AAPL|validation=Medium|model=HOLD|model_conf=Low|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,KEEP_SIGNAL,HOLD,Medium,PAPER_MONITOR_ONLY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-05-30 16:59:11
-0860d122-5fb6-47e2-9cd8-2c6508db7c6e,AAPL,311.28,2026-05-29 16:51:05,symbol=AAPL|validation=Medium|model=HOLD|model_conf=Medium|analyst=POSITIVE_BUT_ENTRY_RISK|trend=Positive|entry_risk=High|volatility=Low,KEEP_SIGNAL,HOLD,Low,PAPER_MONITOR_ONLY,"1_day,7_day,30_day,1_month,6_month,1_year",2026-05-30 16:51:05
-7a8acf61,AAPL,312.51,2026-05-29 05:30:29,,DOWNGRADE_TO_HOLD,HOLD,Low,pending,,
+decision_20260531004419_1df636d782,UNKNOWN,,2026-05-31 00:44:19,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531004318_7b4c4da639,UNKNOWN,,2026-05-31 00:43:18,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531004127_6654930096,UNKNOWN,,2026-05-31 00:41:27,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531004055_fabb5c641e,UNKNOWN,,2026-05-31 00:40:55,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531004051_17018f651e,UNKNOWN,,2026-05-31 00:40:51,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531003954_c7d9c2dc99,UNKNOWN,,2026-05-31 00:39:54,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531003948_6532060bf4,UNKNOWN,,2026-05-31 00:39:48,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531003314_98c8d571d7,UNKNOWN,,2026-05-31 00:33:14,,,,,PAPER_MONITOR_ONLY,,
+decision_20260531003246_a16cf2572f,UNKNOWN,,2026-05-31 00:32:46,,,,,PAPER_MONITOR_ONLY,,

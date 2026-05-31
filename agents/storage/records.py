@@ -128,17 +128,39 @@ class StorageRecordMixin:
         if reward_record_result.get("success") is False:
             return {"success": False, "skipped": True, "reason": reward_record_result.get("summary") or reward_record_result.get("error")}
 
-        decision_id = reward_record_result.get("decision_id") or reward_record_result.get("paper_decision_id") or self._new_id("decision")
+        # Do not create placeholder paper decisions for disabled memory runs,
+        # duplicate-control skips, or calls where RewardAgent did not create a
+        # real decision/horizon set. Otherwise the Evaluator can show open
+        # decisions with zero reward horizons, which looks like a broken N/A.
+        decision_id = reward_record_result.get("decision_id") or reward_record_result.get("paper_decision_id")
+        entry_price = self._safe_float(reward_record_result.get("entry_price"))
+        symbol = self._normalise_symbol(reward_record_result.get("symbol"))
+        if (
+            not decision_id
+            or not symbol
+            or entry_price is None
+            or reward_record_result.get("skipped_duplicate_control")
+            or "disabled" in str(reward_record_result.get("summary", "")).lower()
+        ):
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "No new RewardAgent paper decision was created for this run.",
+            }
+
         row = {
             "decision_id": decision_id,
             "run_id": run_id or reward_record_result.get("run_id"),
-            "symbol": self._normalise_symbol(reward_record_result.get("symbol")),
-            "entry_price": self._safe_float(reward_record_result.get("entry_price")),
+            "symbol": symbol,
+            "entry_price": entry_price,
             "final_signal": reward_record_result.get("final_signal"),
             "risk_action": reward_record_result.get("risk_action"),
             "risk_level": reward_record_result.get("risk_level"),
             "strategy_action": reward_record_result.get("strategy_action"),
             "status": reward_record_result.get("paper_status") or reward_record_result.get("status") or "PAPER_MONITOR_ONLY",
+            "paper_status": reward_record_result.get("paper_status") or reward_record_result.get("status") or "PAPER_MONITOR_ONLY",
+            "entry_time_utc": reward_record_result.get("entry_time_utc") or reward_record_result.get("created_at_utc") or self._now_utc(),
+            "q_state": reward_record_result.get("q_state"),
             "created_at_utc": reward_record_result.get("created_at_utc") or self._now_utc(),
             "updated_at_utc": self._now_utc(),
             "raw_json": self._to_json(reward_record_result),
@@ -155,9 +177,23 @@ class StorageRecordMixin:
             updates = [updates]
         count = 0
         for update in updates:
+            if not isinstance(update, dict):
+                continue
+
+            # RewardAgent already owns the canonical reward_updates table.
+            # StorageAgent only mirrors meaningful updates; it should not invent
+            # completed rows for skipped/not-yet-due horizons.
+            decision_id = update.get("decision_id")
+            has_real_outcome = update.get("updated") is True or update.get("reward") is not None or update.get("future_return") is not None
+            if not decision_id and not has_real_outcome:
+                continue
+
             update_id = str(update.get("update_id") or update.get("id") or update.get("reward_update_id") or self._new_id("reward"))
             horizon_days = self._safe_int(update.get("horizon_days") or update.get("reward_horizon_days"))
             target_date = update.get("target_date_utc") or update.get("due_at_utc")
+            status = update.get("status")
+            if not status:
+                status = "completed" if has_real_outcome else "pending"
             row = {
                 # Old StorageAgent schema
                 "id": update_id,
@@ -171,10 +207,10 @@ class StorageRecordMixin:
                 "latest_date": update.get("latest_date"),
                 "dqn_update_json": self._to_json(update.get("dqn_update") or update.get("dqn_update_json")),
                 "dqn_update_summary": update.get("dqn_update_summary"),
-                "notes": update.get("notes"),
+                "notes": update.get("notes") or update.get("reason"),
                 "created_at_utc": update.get("created_at_utc") or update.get("updated_at_utc") or self._now_utc(),
                 # Shared fields
-                "decision_id": update.get("decision_id"),
+                "decision_id": decision_id,
                 "symbol": self._normalise_symbol(update.get("symbol")),
                 "entry_price": self._safe_float(update.get("entry_price")),
                 "latest_close": self._safe_float(update.get("latest_close")),
@@ -184,7 +220,7 @@ class StorageRecordMixin:
                 "final_signal": update.get("final_signal"),
                 "strategy_action": update.get("strategy_action"),
                 "risk_action": update.get("risk_action"),
-                "status": update.get("status") or "completed",
+                "status": status,
                 "updated_at_utc": update.get("updated_at_utc") or self._now_utc(),
                 "raw_json": self._to_json(update),
             }

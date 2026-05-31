@@ -50,7 +50,7 @@ class RiskReplayMixin:
 
 
     def _init_replay_db(self) -> None:
-        """Create the SQLite replay-memory table used as the primary DQN memory."""
+        """Create or upgrade the SQLite replay-memory table used by DQN."""
         try:
             with sqlite3.connect(self.replay_db_path) as conn:
                 conn.execute(
@@ -70,6 +70,28 @@ class RiskReplayMixin:
                     )
                     """
                 )
+
+                # StorageAgent may have created this table earlier with an
+                # audit-oriented schema. Add the strict DQN columns when needed
+                # instead of silently failing to write replay samples.
+                existing = {row[1] for row in conn.execute("PRAGMA table_info(risk_dqn_replay)").fetchall()}
+                specs = {
+                    "created_at_utc": "TEXT",
+                    "state_text": "TEXT",
+                    "state_vector_json": "TEXT",
+                    "action": "TEXT",
+                    "action_index": "INTEGER",
+                    "reward": "REAL",
+                    "next_state_text": "TEXT",
+                    "next_state_vector_json": "TEXT",
+                    "done": "INTEGER",
+                    "source": "TEXT",
+                    "transition_id": "TEXT",
+                }
+                for column, column_type in specs.items():
+                    if column not in existing:
+                        conn.execute(f"ALTER TABLE risk_dqn_replay ADD COLUMN {column} {column_type}")
+
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_time ON risk_dqn_replay(created_at_utc)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_dqn_replay_action ON risk_dqn_replay(action)")
         except Exception:
@@ -81,6 +103,7 @@ class RiskReplayMixin:
         try:
             if not self.replay_db_path.exists() or self.replay_db_path.stat().st_size == 0:
                 return self._empty_replay_df()
+            self._init_replay_db()
             with sqlite3.connect(self.replay_db_path) as conn:
                 table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='risk_dqn_replay'"
@@ -93,7 +116,10 @@ class RiskReplayMixin:
                            action, action_index, reward, next_state_text,
                            next_state_vector_json, done
                     FROM risk_dqn_replay
-                    ORDER BY id ASC
+                    WHERE state_vector_json IS NOT NULL
+                      AND action_index IS NOT NULL
+                      AND reward IS NOT NULL
+                    ORDER BY created_at_utc ASC
                     """,
                     conn,
                 )
@@ -108,28 +134,30 @@ class RiskReplayMixin:
     def _append_replay_to_sqlite(self, row: Dict[str, Any]) -> bool:
         try:
             self._init_replay_db()
+            import uuid
             with sqlite3.connect(self.replay_db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO risk_dqn_replay (
-                        created_at_utc, state_text, state_vector_json,
-                        action, action_index, reward, next_state_text,
-                        next_state_vector_json, done, source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        row.get("created_at_utc"),
-                        row.get("state_text"),
-                        row.get("state_vector_json"),
-                        row.get("action"),
-                        int(row.get("action_index", 0)),
-                        float(row.get("reward", 0.0)),
-                        row.get("next_state_text"),
-                        row.get("next_state_vector_json"),
-                        1 if row.get("done") else 0,
-                        "risk_agent",
-                    ),
-                )
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(risk_dqn_replay)").fetchall()}
+                payload = {
+                    "transition_id": str(uuid.uuid4()),
+                    "created_at_utc": row.get("created_at_utc"),
+                    "state_text": row.get("state_text"),
+                    "state_vector_json": row.get("state_vector_json"),
+                    "state_json": row.get("state_vector_json"),
+                    "action": row.get("action"),
+                    "action_index": int(row.get("action_index", 0)),
+                    "reward": float(row.get("reward", 0.0)),
+                    "next_state_text": row.get("next_state_text"),
+                    "next_state_vector_json": row.get("next_state_vector_json"),
+                    "next_state_json": row.get("next_state_vector_json"),
+                    "done": 1 if row.get("done") else 0,
+                    "source": "risk_agent",
+                }
+                clean = {k: v for k, v in payload.items() if k in columns and v is not None}
+                if not clean:
+                    return False
+                col_sql = ", ".join(clean.keys())
+                val_sql = ", ".join(["?"] * len(clean))
+                conn.execute(f"INSERT INTO risk_dqn_replay ({col_sql}) VALUES ({val_sql})", list(clean.values()))
             return True
         except Exception:
             return False
