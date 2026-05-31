@@ -9,6 +9,7 @@ from app_components.helpers import (
     call_agent_method,
     clean_symbol,
     historical_to_dataframe,
+    latest_close_from_historical_data,
     selected_price_from_quote,
 )
 
@@ -134,6 +135,11 @@ def run_single_stock_pipeline(
     )
 
     entry_price = selected_price_from_quote(multi_quote, validation_result)
+    entry_price_source = "live_quote"
+    if entry_price is None:
+        entry_price = latest_close_from_historical_data(model_historical_data)
+        entry_price_source = "latest_historical_close" if entry_price is not None else "unavailable"
+
     reward_record_result = {}
     if record_paper_decision and entry_price:
         reward_record_result = call_agent_method(
@@ -146,10 +152,17 @@ def run_single_stock_pipeline(
             entry_price=entry_price,
             risk_result=risk_result,
         )
+        if isinstance(reward_record_result, dict):
+            reward_record_result["entry_price_source"] = entry_price_source
     else:
+        reason = "Paper decision recording was disabled for this UI run."
+        if record_paper_decision and not entry_price:
+            reason = "Paper decision was not recorded because neither a live quote nor a historical close was available."
         reward_record_result = {
             "success": True,
-            "summary": "Paper decision recording was disabled for this UI run.",
+            "recording_skipped": True,
+            "entry_price_source": entry_price_source,
+            "summary": reason,
         }
 
     auto_reward_update_result = call_agent_method(

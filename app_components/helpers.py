@@ -228,3 +228,21 @@ def historical_to_dataframe(historical_data: Dict[str, Any]) -> pd.DataFrame:
             df[col] = pd.to_numeric(first_series(df, col), errors="coerce")
 
     return df
+
+def latest_close_from_historical_data(historical_data: Dict[str, Any]) -> Optional[float]:
+    """Return the latest valid close from historical OHLCV data.
+
+    This is used as a safe paper-research fallback when live quote APIs are
+    not configured. It lets the Reward Agent record a paper decision using
+    the latest available historical close instead of creating no reward
+    horizon at all.
+    """
+    df = historical_to_dataframe(historical_data)
+    if df.empty or "close" not in df.columns:
+        return None
+    close = pd.to_numeric(df["close"], errors="coerce").dropna()
+    if close.empty:
+        return None
+    value = float(close.iloc[-1])
+    return value if value > 0 else None
+
