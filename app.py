@@ -14,7 +14,7 @@ configure_page()
 
 agents = load_agents()
 
-st.title("📊 Human-in-the-Loop Multi-Agent Stock Research System")
+st.title("📊 Multi-Agent-Trading-Advisory-System")
 st.caption(
     "Paper decision-support only. The system uses agents for data, validation, analysis, "
     "model signal, DQN risk control, strategy planning, memory, and LLM explanation."
