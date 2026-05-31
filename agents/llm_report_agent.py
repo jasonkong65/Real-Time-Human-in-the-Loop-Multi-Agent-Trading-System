@@ -177,11 +177,85 @@ class LLMReportAgent:
             (r"\bclear your position\b", "review the paper position exposure"),
             (r"\badd leverage\b", "avoid leverage in this prototype"),
             (r"\buse leverage\b", "use no leverage in this prototype"),
+            (r"\bNO_ACTION_DATA_OR_RISK_BLOCK\b", "No Action / Risk Block"),
+            (r"\bWAIT_FOR_PULLBACK_OR_CONFIRMATION\b", "Wait for Pullback / Confirmation"),
+            (r"\bWAIT_FOR_CONFIRMATION\b", "Wait for Confirmation"),
+            (r"\bMONITOR_POSITIVE_SETUP\b", "Monitor Positive Setup"),
+            (r"\bWATCHLIST_BULLISH_ENTRY_RISK\b", "Bullish Watchlist / Entry Risk"),
+            (r"\bBUY_WATCHLIST_ENTRY_RISK\b", "Bullish Watchlist / Entry Risk"),
+            (r"\bBUY_WATCHLIST_OVERBOUGHT\b", "Bullish Watchlist / High Entry Risk"),
+            (r"\bBUY_CANDIDATE\b", "Research Candidate"),
+            (r"\bSELL_RISK\b", "Risk Review"),
+            (r"\bBLOCKED\b", "Blocked"),
         ]
         clean = text
         for pattern, replacement in replacements:
             clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
         return clean.strip()
+
+
+    def _clean_label(self, value: Any, fallback: str = "Unknown") -> str:
+        """Convert internal enum-like labels into user-facing text."""
+        if value is None:
+            return fallback
+        text = str(value).strip()
+        if not text:
+            return fallback
+        replacements = {
+            "POSITIVE_BUT_ENTRY_RISK": "Positive + Entry Risk",
+            "WATCHLIST_BULLISH_ENTRY_RISK": "Bullish Watchlist / Entry Risk",
+            "BUY_WATCHLIST_ENTRY_RISK": "Bullish Watchlist / Entry Risk",
+            "BUY_WATCHLIST_OVERBOUGHT": "Bullish Watchlist / High Entry Risk",
+            "WAIT_FOR_PULLBACK_OR_CONFIRMATION": "Wait for Pullback / Confirmation",
+            "WAIT_FOR_CONFIRMATION": "Wait for Confirmation",
+            "MONITOR_POSITIVE_SETUP": "Monitor Positive Setup",
+            "MONITOR_AND_RESEARCH": "Monitor + Research",
+            "RISK_REDUCTION_REVIEW": "Risk Reduction Review",
+            "RESEARCH_FOR_POSSIBLE_ENTRY": "Research for Paper Entry",
+            "NO_ACTION_DATA_OR_RISK_BLOCK": "No Action / Risk Block",
+            "BUY_CANDIDATE": "Research Candidate",
+            "SELL_RISK": "Risk Review",
+            "HOLD": "Hold / Monitor",
+            "BLOCKED": "Blocked",
+            "LOW": "Low",
+            "MEDIUM": "Medium",
+            "HIGH": "High",
+            "CRITICAL": "Critical",
+            "DEFENSIVE": "Defensive",
+            "CAUTIOUS": "Cautious",
+            "CONSERVATIVE": "Conservative",
+        }
+        return replacements.get(text, text.replace("_", " ").title())
+
+    def _clean_list(self, items: Any, limit: int = 5) -> List[str]:
+        if not isinstance(items, list):
+            return []
+        clean = []
+        for item in items[:limit]:
+            if item is None:
+                continue
+            clean.append(str(item).strip())
+        return [x for x in clean if x]
+
+    def _single_stock_human_facts(self, facts: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare source facts for either Groq or local fallback without raw internal codes."""
+        return {
+            "symbol": facts.get("symbol", "UNKNOWN"),
+            "validation_confidence": self._clean_label(facts.get("validation_confidence")),
+            "analyst_view": self._clean_label(facts.get("analyst_display") or facts.get("analyst_signal")),
+            "analyst_score": facts.get("analyst_score"),
+            "model_view": self._clean_label(facts.get("model_display") or facts.get("model_signal")),
+            "model_confidence": self._clean_label(facts.get("model_confidence")),
+            "risk_signal": self._clean_label(facts.get("risk_final_signal")),
+            "risk_level": self._clean_label(facts.get("risk_level")),
+            "risk_interpretation": facts.get("risk_interpretation") or "The system is staying cautious because market and model signals can change quickly.",
+            "strategy_action": self._clean_label(facts.get("strategy_action")),
+            "strategy_level": self._clean_label(facts.get("strategy_level")),
+            "position_guidance": facts.get("position_guidance") or "Use this as a research note only.",
+            "leverage_guidance": facts.get("leverage_guidance") or "Do not use leverage in this prototype.",
+            "checklist": self._clean_list(facts.get("checklist")),
+            "conditions_to_reconsider": self._clean_list(facts.get("conditions_to_reconsider")),
+        }
 
     def _report_quality_score(self, text: str, source_grounded: bool = True) -> Dict[str, Any]:
         """Lightweight quality check for demo/debugging."""
@@ -464,11 +538,14 @@ class LLMReportAgent:
             "checklist": strategy_result.get("checklist", []),
             "conditions_to_reconsider": strategy_result.get("conditions_to_reconsider", []),
         }
-        system_prompt = self._short_system_prompt("Explain one stock pipeline result.")
+        human_facts = self._single_stock_human_facts(facts)
+        system_prompt = self._short_system_prompt("Explain one stock pipeline result for a non-technical user.")
         user_prompt = (
-            "Use these headings: Direct answer, Evidence, Strategy, Risk note, Disclaimer.\n"
-            "Explain the result without direct buy/sell instructions.\n\n"
-            f"Facts:\n{self._safe_json(facts)}"
+            "Use these headings exactly: Direct answer, Key evidence, Strategy guidance, Risk note, Disclaimer.\n"
+            "Write in simple user-facing language. Do not expose raw enum labels or internal codes.\n"
+            "Do not say the ticker is 'not a direct trading instruction'. Instead, explain what the system recommends for paper research.\n"
+            "Do not give direct buy/sell instructions. Keep the wording cautious and source-grounded.\n\n"
+            f"Facts:\n{self._safe_json(human_facts)}"
         )
         groq = self._call_groq(system_prompt, user_prompt)
         if groq.get("success"):
@@ -490,27 +567,58 @@ class LLMReportAgent:
         return self._fallback_single_stock(facts, groq.get("error"))
 
     def _fallback_single_stock(self, facts: Dict[str, Any], error: Optional[str] = None) -> Dict[str, Any]:
-        symbol = facts.get("symbol", "UNKNOWN")
+        human = self._single_stock_human_facts(facts)
+        symbol = human.get("symbol", "UNKNOWN")
+        risk_signal = human.get("risk_signal", "Unknown")
+        strategy_action = human.get("strategy_action", "Unknown")
+        risk_level = human.get("risk_level", "Unknown")
+        strategy_level = human.get("strategy_level", "Unknown")
+
+        if risk_signal == "Blocked" or "Block" in strategy_action or risk_level in {"High", "Critical"}:
+            direct_answer = (
+                f"For **{symbol}**, the system does **not** have enough safe evidence for a paper decision at this stage. "
+                f"The risk-controlled signal is **{risk_signal}**, so the safest research action is **{strategy_action}**."
+            )
+        elif "Research Candidate" in risk_signal:
+            direct_answer = (
+                f"For **{symbol}**, the system marks this as a **paper research candidate**, "
+                "but the user should still review the evidence and risk notes before taking any simulated action."
+            )
+        else:
+            direct_answer = (
+                f"For **{symbol}**, the system suggests a **watchlist / monitor** stance rather than an immediate paper decision. "
+                f"The current strategy is **{strategy_action}**."
+            )
+
+        checklist = human.get("checklist") or []
+        checklist_text = "\n".join([f"- {item}" for item in checklist[:4]]) or "- Re-run the pipeline after the next market data refresh."
+
         report = f"""
 **Direct answer**  
-{symbol} is not a direct trading instruction. The risk-controlled signal is **{facts.get('risk_final_signal')}**, and the strategy action is **{facts.get('strategy_action')}**.
+{direct_answer}
 
-**Evidence**  
-- Validation confidence: {facts.get('validation_confidence')}  
-- Analyst view: {facts.get('analyst_display') or facts.get('analyst_signal')}  
-- Model view: {facts.get('model_display') or facts.get('model_signal')} with {facts.get('model_confidence')} confidence  
-- Risk level: {facts.get('risk_level')}  
-- Strategy level: {facts.get('strategy_level')}
+**Key evidence**  
+- Validation confidence: {human.get('validation_confidence')}  
+- Analyst view: {human.get('analyst_view')}  
+- Model view: {human.get('model_view')} with {human.get('model_confidence')} confidence  
+- Risk level: {risk_level}  
+- Strategy level: {strategy_level}
 
-**Strategy**  
-{facts.get('position_guidance') or 'Use this as a research note only.'}
+**Strategy guidance**  
+{human.get('position_guidance')}
+
+{human.get('leverage_guidance')}
 
 **Risk note**  
-{facts.get('risk_interpretation') or 'Market conditions can change quickly.'}
+{human.get('risk_interpretation')}
+
+**Next checks**  
+{checklist_text}
 
 **Disclaimer**  
 This is for paper decision support and class demonstration only. It is not personalized financial advice.
 """.strip()
+        report = self._sanitize_investment_wording(report)
         return {
             "success": True,
             "agent": "Groq Report Agent",
