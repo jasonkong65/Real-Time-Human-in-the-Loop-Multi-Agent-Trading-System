@@ -467,7 +467,11 @@ class RewardAgent:
         risk_level = str(risk_level or "").upper()
 
         if risk_action == "BLOCK_TRADE" or final_signal == "BLOCKED":
-            return "PAPER_BLOCKED_NO_ENTRY"
+            # A blocked signal still has an entry-price benchmark so the
+            # Evaluator can later check whether avoiding the paper entry was
+            # a good decision. It is therefore a risk-blocked paper decision,
+            # not a missing-entry error.
+            return "PAPER_RISK_BLOCKED"
         if final_signal == "BUY_CANDIDATE":
             return "PAPER_WATCHLIST_ENTRY_CANDIDATE"
         if final_signal == "SELL_RISK":
