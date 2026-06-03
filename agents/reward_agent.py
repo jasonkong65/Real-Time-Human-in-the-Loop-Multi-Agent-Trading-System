@@ -122,8 +122,22 @@ class RewardAgent:
             return None
 
     def _parse_date(self, value: Any) -> Optional[pd.Timestamp]:
+        """Parse a scalar date into a tz-naive normalized pandas Timestamp.
+
+        Reward updates compare the latest available market close date with a
+        target reward date. yfinance and SQLite can return a mix of tz-aware
+        values, ISO strings, and plain YYYY-MM-DD strings. Pandas will raise
+        "Cannot compare tz-naive and tz-aware timestamps" if these are
+        compared directly, so every date used for calendar comparison is
+        normalized to a timezone-free midnight timestamp here.
+        """
         try:
-            return pd.to_datetime(value).normalize()
+            if value is None or value == "":
+                return None
+            ts = pd.to_datetime(value, utc=True, errors="coerce")
+            if pd.isna(ts):
+                return None
+            return pd.Timestamp(ts).tz_convert(None).normalize()
         except Exception:
             return None
 
@@ -815,7 +829,7 @@ class RewardAgent:
                 continue
 
             latest_date = self._parse_date(latest.get("latest_date"))
-            target_date = pd.to_datetime(target_dt).normalize() if target_dt else None
+            target_date = self._parse_date(target_dt) if target_dt else None
 
             # If the horizon is due in calendar time but no market close exists yet,
             # keep it pending until the next available close.
